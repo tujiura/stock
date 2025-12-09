@@ -23,33 +23,6 @@ try:
 except ImportError:
     pass
 
-def send_line_notify(message):
-    # ... (この関数の中身は前回のままでOKですが、念のため再掲します) ...
-    line_notify_token = os.getenv("LINE_TOKEN")
-    if not line_notify_token:
-        print("LINE_TOKENが設定されていません")
-        return
-
-    line_notify_api = "https://notify-api.line.me/api/notify"
-    headers = {"Authorization": f"Bearer {line_notify_token}"}
-    data = {"message": f"\n{message}"}
-
-    session = requests.Session()
-    retries = Retry(
-        total=5,
-        backoff_factor=2,
-        status_forcelist=[500, 502, 503, 504],
-        allowed_methods=["POST"]
-    )
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-
-    try:
-        response = session.post(line_notify_api, headers=headers, data=data, timeout=20)
-        response.raise_for_status()
-        print("✅ LINE通知送信成功")
-    except Exception as e:
-        print(f"⚠️ LINE送信エラー: {e}")
-
 def main():
     print("=== 🧪 GitHub Actions 動作確認テスト (IPv4強制版) ===")
     
@@ -88,8 +61,25 @@ def main():
     # 3. LINE通知テスト
     print("\n📱 [3] LINE通知テスト")
     if line_token:
-        print("LINEサーバーに送信中...")
-        send_line_notify("これはGitHub Actionsからのテスト通知です。\nIPv4強制モードで成功しました！🚀")
+        url = "https://notify-api.line.me/api/notify"
+        headers = {"Authorization": f"Bearer {line_token}"}
+        msg = "\nこれはGitHub Actionsからのテスト通知です。\nIPv4強制モードで成功しました！🚀"
+        
+        session = requests.Session()
+        retries = Retry(total=5, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
+        session.mount("https://", HTTPAdapter(max_retries=retries))
+
+        try:
+            print("LINEサーバーに送信中...")
+            res = session.post(url, headers=headers, data={"message": msg}, timeout=20)
+            
+            if res.status_code == 200:
+                print("✅ LINE送信成功！スマホを確認してください。")
+            else:
+                print(f"❌ 送信失敗 (Status: {res.status_code}): {res.text}")
+                
+        except Exception as e:
+            print(f"❌ 通信エラー: {e}")
     else:
         print("⚠️ トークンがないためスキップ")
 
