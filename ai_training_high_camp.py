@@ -13,11 +13,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==========================================
 # ★設定エリア (Ver.2 ハイボラ対応版)
 # ==========================================
-GOOGLE_API_KEY = "ここにAPIキーを貼り付け".strip() 
+GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY").strip()
+if not GOOGLE_API_KEY:
+    print("エラー: GOOGLE_API_KEY が設定されていません。")
+    exit()
+
 LOG_FILE = "ai_trade_memory_high_vol.csv"  # ★ファイル名を変更（混同防止）
 MODEL_NAME = 'models/gemini-2.5-pro'
 

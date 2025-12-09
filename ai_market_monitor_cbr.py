@@ -13,6 +13,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def send_line_notify(message):
             line_notify_token = os.environ.get("LINE_TOKEN") # GitHubの設定から読み込む
@@ -34,8 +37,10 @@ if __name__ == "__main__":
     # ==========================================
     # ★設定エリア
     # ==========================================
-    GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY").strip() 
-
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY").strip()
+    if not GOOGLE_API_KEY:
+        print("エラー: GOOGLE_API_KEY が設定されていません。")
+        exit()
     # ログファイル名 (リスク管理対応版)
     LOG_FILE = "ai_trade_memory_risk_managed.csv"
     MODEL_NAME = 'models/gemini-3-pro-preview' # 必要に応じて pro 等に変更

@@ -11,13 +11,18 @@ import matplotlib.pyplot as plt
 import google.generativeai as genai
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==========================================
 # ★設定エリア
 # ==========================================
-GOOGLE_API_KEY = "AIzaSyDsOgmFFantDOzD6scaNNVal1hDg9TGsNE".strip() 
+GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY").strip()
 genai.configure(api_key=GOOGLE_API_KEY)
-
+if not GOOGLE_API_KEY:
+    print("エラー: GOOGLE_API_KEY が設定されていません。")
+    exit()
 MODEL_NAME = 'models/gemini-2.5-pro' 
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
