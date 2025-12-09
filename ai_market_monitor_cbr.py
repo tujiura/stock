@@ -116,6 +116,57 @@ def download_data_safe(ticker, period="6mo", interval="1d", retries=3):
             time.sleep(wait); wait *= 2
     return None
 
+# ==========================================
+# ★追加: ファンダメンタルズ情報取得関数
+# ==========================================
+def get_fundamentals(ticker):
+    try:
+        # yfinanceのTickerオブジェクトを作成
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        
+        # 必要な情報を取得（データがない場合は '-' や 0 を返す）
+        # 日本株の場合、yfinanceのinfo取得は少し時間がかかることがあります
+        data = {
+            "name": info.get("longName", ticker),
+            "sector": info.get("sector", "不明"),
+            "market_cap": info.get("marketCap", 0), # 時価総額
+            "per": info.get("trailingPE", 0),       # PER
+            "pbr": info.get("priceToBook", 0),      # PBR
+            "roe": info.get("returnOnEquity", 0),   # ROE
+            "dividend_yield": info.get("dividendYield", 0) # 配当利回り
+        }
+        
+        # データ整形（読みやすくする）
+        # 時価総額を「兆/億」表記に
+        m_cap = data['market_cap']
+        if m_cap > 1000000000000:
+            cap_str = f"{m_cap/1000000000000:.1f}兆円"
+        elif m_cap > 100000000:
+            cap_str = f"{m_cap/100000000:.0f}億円"
+        else:
+            cap_str = "-"
+
+        # ROEと配当を%表記に
+        roe_str = f"{data['roe']*100:.1f}%" if data['roe'] else "-"
+        div_str = f"{data['dividend_yield']*100:.2f}%" if data['dividend_yield'] else "-"
+        per_str = f"{data['per']:.1f}倍" if data['per'] else "-"
+        pbr_str = f"{data['pbr']:.2f}倍" if data['pbr'] else "-"
+
+        # AIに渡すためのテキストを作成
+        text = f"""
+【ファンダメンタルズ】
+- 企業名: {data['name']} (セクター: {data['sector']})
+- 時価総額: {cap_str}
+- 割安性: PER {per_str}, PBR {pbr_str}
+- 収益・還元: ROE {roe_str}, 配当利回り {div_str}
+"""
+        return text.strip()
+
+    except Exception as e:
+        print(f"  (ファンダ取得エラー: {e})")
+        return "【ファンダメンタルズ】データ取得失敗"
+
 def calculate_metrics_enhanced(df):
     if len(df) < 15: return None 
     
@@ -236,31 +287,39 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
     prompt = f"""
 あなたは「超低リスク・買い専門のヘッジファンドCIO」です。
 勝率100%を目指すため、リスクの高い局面は全て見送ります。
+今回はテクニカルだけでなく、**ファンダメンタルズ（業績・割安性）も考慮して** 総合判断してください。
 
 === 入力情報 ===
-銘柄: {name}
-1. テクニカル:
+銘柄: {name} (Timeframe: {TIMEFRAME})
+
+1. マクロ環境: {macro}
+
+2. テクニカル:
    - トレンド: {trend_dir} (勢い: {metrics['trend_momentum']:.2f})
    - SMA25乖離: {metrics['sma25_dev']:.2f}%
    - ボラティリティ: {metrics['entry_volatility']:.2f}%
    - 統計的SL目安: {mech_sl_long:.0f} 円付近
-2. ニュース: {news}
+
+3. {fundamentals}
+
+4. 最新ニュース: {news}
 
 {cbr_text}
 
 === 鉄の掟 (売買基準) ===
+
 {vol_limit_msg}
 
 1. **【BUY (新規買い)】の絶対条件**
-   - **ボラティリティが 2.0% 未満であること。** (これを超えていたら即却下)
+   - **ボラティリティが 2.0% 未満であること。** (絶対厳守)
    - SMA25が上向きで、明確な上昇トレンド中であること。
-   - 価格がSMA25付近（押し目）にあること。
-   - 必ず損切り(stop_loss_price)を設定すること。
+   - **ファンダメンタルズに致命的な問題がないこと**（極端な割高や赤字など）。
+   - ただし、テクニカル（トレンド）が非常に強い場合は、多少の割高感は許容してよい。
 
 2. **【HOLD (様子見・利益確定)】**
    - ボラティリティが 2.0% 以上の場合。
-   - 下降トレンド、またはトレンドが不明確な場合。
-   - **SELL（空売り）は禁止。** すべてHOLDで対応せよ。
+   - トレンドが崩れている場合。
+   - 業績に対して株価がバブル気味で、下落リスクが高いと判断した場合。
 
 === 出力 (JSONのみ) ===
 {{
@@ -268,7 +327,7 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
   "confidence": 0-100,
   "stop_loss_price": 数値 (HOLDなら0),
   "stop_loss_reason": "直近安値◯◯円割れ... (30文字以内)",
-  "reason": "ボラティリティ1.5%と低く、SMA25の押し目... (100文字以内)"
+  "reason": "ボラティリティ1.5%と低く、PER12倍で割安感もあり、SMA25の押し目... (100文字以内)"
 }}
 """
     try:
@@ -325,8 +384,12 @@ if __name__ == "__main__":
         chart = create_chart_image(df, name)
         news = get_latest_news(name)
         
-        res = analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, name)
+        # ★追加: ここでファンダメンタルズを取得
+        fundamentals = get_fundamentals(name)
         
+        # analyze_vision_agent に fundamentals を渡すように変更します（次のステップで関数側も変更）
+        res = analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, fundamentals, name)  
+              
         action = res.get('action', 'HOLD')
         conf = res.get('confidence', 0)
         sl_price_raw = res.get('stop_loss_price', 0)
