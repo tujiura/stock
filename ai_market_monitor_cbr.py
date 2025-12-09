@@ -18,35 +18,6 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 import socket
 import requests.packages.urllib3.util.connection as urllib3_cn
-import subprocess # これが必要です
-
-# ==========================================
-# ★追加: GitHub自動同期機能
-# ==========================================
-def auto_git_push(commit_message="Auto update trade memory"):
-    """
-    学習結果(CSV)を自動でGitHubにプッシュする
-    """
-    try:
-        print("\n☁️ GitHubへ同期中...")
-        
-        # 1. 変更をステージング
-        subprocess.run(["git", "add", "ai_trade_memory_risk_managed.csv"], check=True)
-        
-        # 2. コミット (変更がない場合はエラーになるのでtryで囲む)
-        try:
-            subprocess.run(["git", "commit", "-m", commit_message], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError:
-            print("   (変更がないためコミットはスキップされました)")
-            return
-
-        # 3. プッシュ
-        subprocess.run(["git", "push"], check=True)
-        print("✅ 同期完了！クラウドダッシュボードが更新されました。")
-        
-    except Exception as e:
-        print(f"⚠️ GitHub同期エラー: {e}")
-        print("   (Gitがインストールされているか、リポジトリ内か確認してください)")
 
 # ---------------------------------------------------------
 # ★環境設定 & おまじない (Windows/GitHub Actions対応)
@@ -706,4 +677,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"⚠️ ファイル保存エラー: {e}")
     # ---------------------------------------------------
-    auto_git_push(commit_message="Training Camp Result Update")

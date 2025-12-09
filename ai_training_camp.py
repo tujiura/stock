@@ -52,7 +52,7 @@ except ImportError:
 # ==========================================
 # ★設定エリア
 # ==========================================
-GOOGLE_API_KEY = os.getenv("TRAIN_API_KEY").strip()
+GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY").strip()
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
     # exit() # 環境によってはコメントアウト
@@ -61,7 +61,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.5-pro' # コストパフォーマンスの良いモデル推奨
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
-TRAINING_ROUNDS = 100 # 1回の実行で行う回数
+TRAINING_ROUNDS = 1 # 1回の実行で行う回数
 TIMEFRAME = "1d" 
 CBR_NEIGHBORS_COUNT = 11
 MIN_VOLATILITY = 1.0 
