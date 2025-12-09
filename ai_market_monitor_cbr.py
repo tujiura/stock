@@ -377,3 +377,18 @@ if __name__ == "__main__":
 
     # Discord送信
     send_discord_notify(report_message)
+
+    # --- ★追加: テキストファイルとして保存する処理 ---
+    try:
+        report_dir = "reports" # 保存するフォルダ名
+        os.makedirs(report_dir, exist_ok=True) # フォルダがなければ作成
+        
+        file_path = os.path.join(report_dir, "latest_report.txt")
+        
+        # "w"モードで開くことで、毎回上書き保存されます
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(report_message)
+        print(f"✅ メッセージをファイルに保存しました: {file_path}")
+    except Exception as e:
+        print(f"⚠️ ファイル保存エラー: {e}")
+    # ---------------------------------------------------
