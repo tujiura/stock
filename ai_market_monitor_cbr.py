@@ -33,7 +33,7 @@ urllib3_cn.allowed_gai_family = allowed_gai_family
 # 3. ローカル環境用 (.env読み込み)
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
 except ImportError:
     pass
 
@@ -48,7 +48,7 @@ webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
 genai.configure(api_key=GOOGLE_API_KEY)
 
 LOG_FILE = "ai_trade_memory_risk_managed.csv"
-MODEL_NAME = 'models/gemini-2.5-pro' # モデル名は適宜変更してください
+MODEL_NAME = 'models/gemini-3-pro-preview' # モデル名は適宜変更してください
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 11
 
@@ -76,27 +76,54 @@ plt.rcParams['font.family'] = 'sans-serif'
 # 1. 通知機能 (Discord対応・堅牢版)
 # ==========================================
 def send_discord_notify(message):
+    # --- テキストファイル保存処理 ---
+    try:
+        report_dir = "reports"
+        os.makedirs(report_dir, exist_ok=True)
+        file_path = os.path.join(report_dir, "latest_report.txt")
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(message)
+        print(f"✅ メッセージをファイルに保存しました: {file_path}")
+    except Exception as e:
+        print(f"⚠️ ファイル保存エラー: {e}")
+    # -------------------------------
+
     webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
     if not webhook_url:
         print("DISCORD_WEBHOOK_URLが設定されていません")
         return
-
-    # Discord用データ作成
-    data = {
-        "content": message,
-        "username": "AI投資アドバイザー",
-        "avatar_url": "https://cdn-icons-png.flaticon.com/512/4228/4228956.png"
-    }
 
     # リトライ設定
     session = requests.Session()
     retries = Retry(total=5, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
     session.mount("https://", HTTPAdapter(max_retries=retries))
 
+    # ★ここが修正ポイント: メッセージを1900文字ごとに分割して送信
+    # Discordの制限は2000文字ですが、余裕を持って1900文字で切ります
+    chunk_size = 1900
+    total_len = len(message)
+    
+    print(f"メッセージサイズ: {total_len}文字 -> 分割送信します")
+
     try:
-        response = session.post(webhook_url, json=data, timeout=20)
-        response.raise_for_status()
-        print("✅ Discord通知送信成功")
+        for i in range(0, total_len, chunk_size):
+            chunk = message[i : i + chunk_size]
+            
+            # 分割した切れ端を送信
+            data = {
+                "content": chunk,
+                "username": "AI投資アドバイザー",
+                "avatar_url": "https://cdn-icons-png.flaticon.com/512/4228/4228956.png"
+            }
+            
+            response = session.post(webhook_url, json=data, timeout=20)
+            response.raise_for_status()
+            
+            # 順番が前後しないように少し待つ
+            time.sleep(1)
+
+        print("✅ Discord通知送信成功 (分割完了)")
+
     except Exception as e:
         print(f"⚠️ Discord送信エラー: {e}")
 
@@ -119,26 +146,38 @@ def download_data_safe(ticker, period="6mo", interval="1d", retries=3):
 # ==========================================
 # ★追加: ファンダメンタルズ情報取得関数
 # ==========================================
+# ==========================================
+# ★修正版: ファンダメンタルズ情報取得関数 (エラー回避版)
+# ==========================================
 def get_fundamentals(ticker):
     try:
-        # yfinanceのTickerオブジェクトを作成
+        # yfinanceのTickerオブジェクト
         stock = yf.Ticker(ticker)
-        info = stock.info
         
-        # 必要な情報を取得（データがない場合は '-' や 0 を返す）
-        # 日本株の場合、yfinanceのinfo取得は少し時間がかかることがあります
+        # .info は非常に重くエラーになりやすいため、
+        # タイムアウト対策として fast_info を優先利用する手もありますが、
+        # ここではエラーハンドリングを強化して info を取得します。
+        try:
+            info = stock.info
+        except:
+            # 取得失敗時は空のデータを返して処理を止めない
+            return "【ファンダメンタルズ】データ取得不可（テクニカルのみで判断します）"
+
+        # 必須データがない場合はスキップ
+        if not info:
+            return "【ファンダメンタルズ】データなし"
+
         data = {
             "name": info.get("longName", ticker),
             "sector": info.get("sector", "不明"),
-            "market_cap": info.get("marketCap", 0), # 時価総額
-            "per": info.get("trailingPE", 0),       # PER
-            "pbr": info.get("priceToBook", 0),      # PBR
-            "roe": info.get("returnOnEquity", 0),   # ROE
-            "dividend_yield": info.get("dividendYield", 0) # 配当利回り
+            "market_cap": info.get("marketCap", 0),
+            "per": info.get("trailingPE", 0),
+            "pbr": info.get("priceToBook", 0),
+            "roe": info.get("returnOnEquity", 0),
+            "dividend_yield": info.get("dividendYield", 0)
         }
         
-        # データ整形（読みやすくする）
-        # 時価総額を「兆/億」表記に
+        # データ整形
         m_cap = data['market_cap']
         if m_cap > 1000000000000:
             cap_str = f"{m_cap/1000000000000:.1f}兆円"
@@ -147,13 +186,11 @@ def get_fundamentals(ticker):
         else:
             cap_str = "-"
 
-        # ROEと配当を%表記に
         roe_str = f"{data['roe']*100:.1f}%" if data['roe'] else "-"
         div_str = f"{data['dividend_yield']*100:.2f}%" if data['dividend_yield'] else "-"
         per_str = f"{data['per']:.1f}倍" if data['per'] else "-"
         pbr_str = f"{data['pbr']:.2f}倍" if data['pbr'] else "-"
 
-        # AIに渡すためのテキストを作成
         text = f"""
 【ファンダメンタルズ】
 - 企業名: {data['name']} (セクター: {data['sector']})
@@ -163,16 +200,17 @@ def get_fundamentals(ticker):
 """
         return text.strip()
 
-    except Exception as e:
-        print(f"  (ファンダ取得エラー: {e})")
-        return "【ファンダメンタルズ】データ取得失敗"
+    except Exception:
+        # どんなエラーが起きても絶対にプログラムを止めない
+        return "【ファンダメンタルズ】取得エラー（無視して続行）"
 
 def calculate_metrics_enhanced(df):
-    if len(df) < 15: return None 
+    if len(df) < 25: return None 
     
     curr = df.iloc[-1]
     price = float(curr['Close'])
     
+    # --- 基本トレンド ---
     sma25 = float(curr['SMA25'])
     sma25_dev = ((price / sma25) - 1) * 100
     
@@ -185,8 +223,31 @@ def calculate_metrics_enhanced(df):
     signal = float(curr['Signal'])
     macd_power = ((macd - signal) / price) * 10000 
 
+    # --- リスク指標 ---
     atr = float(curr['ATR'])
     entry_volatility = (atr / price) * 100
+
+    # --- ★追加: 精度向上用指標 ---
+    # 1. Bollinger Bandwidth (スクイーズ判定)
+    std = df['Close'].rolling(20).std().iloc[-1]
+    # バンド幅 = (4 * 標準偏差) / 単純移動平均
+    # 値が小さいほどエネルギーが溜まっている
+    bb_width = (4 * std) / df['Close'].rolling(20).mean().iloc[-1] * 100
+
+    # 2. Volume Ratio (出来高急増判定)
+    # 直近5日の平均出来高に対する、今日の出来高の倍率
+    vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
+    if vol_ma5 > 0:
+        volume_ratio = float(curr['Volume']) / vol_ma5
+    else:
+        volume_ratio = 1.0
+
+    # 3. RSI (9日) - 押し目判定用
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(9).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(9).mean()
+    rs = gain / loss
+    rsi_9 = 100 - (100 / (1 + rs)).iloc[-1]
 
     return {
         'sma25_dev': sma25_dev,
@@ -194,7 +255,11 @@ def calculate_metrics_enhanced(df):
         'macd_power': macd_power,
         'entry_volatility': entry_volatility,
         'price': price,
-        'atr_value': atr
+        'atr_value': atr,
+        # 新指標
+        'bb_width': bb_width,
+        'volume_ratio': volume_ratio,
+        'rsi_9': rsi_9
     }
 
 # ==========================================
@@ -253,8 +318,80 @@ class CaseBasedMemory:
 # ==========================================
 # 4. 外部データ & AI分析ロジック
 # ==========================================
+# ==========================================
+# ★強化版: マクロ経済データ取得
+# ==========================================
 def get_macro_data():
-    return "【マクロ環境】\n- 日経平均: レンジ相場\n- ドル円: 150円付近で推移"
+    """
+    主要指数(日経平均, ドル円, S&P500, 米金利, VIX)をリアルタイム取得し、
+    AIが環境認識するためのテキストを生成する。
+    """
+    tickers = {
+        "^N225": "日経平均",
+        "JPY=X": "ドル円",
+        "^GSPC": "米S&P500",
+        "^TNX": "米10年債利回り",
+        "^VIX": "VIX(恐怖指数)"
+    }
+    
+    report = "【🌎 マクロ環境・地合い】\n"
+    
+    try:
+        # 一括ダウンロードで高速化 (直近5日分)
+        data = yf.download(list(tickers.keys()), period="5d", progress=False)
+        
+        # マルチインデックス対応 (yfinanceのバージョン差異対策)
+        if isinstance(data.columns, pd.MultiIndex):
+            # Close列だけ抽出して簡素化
+            df_close = data['Close']
+        else:
+            df_close = data['Close'] if 'Close' in data else data
+
+        for symbol, name in tickers.items():
+            try:
+                # 個別の列データを取得
+                series = df_close[symbol].dropna()
+                if len(series) < 2:
+                    report += f"- {name}: データ不足\n"
+                    continue
+
+                current = float(series.iloc[-1])
+                prev = float(series.iloc[-2])
+                
+                # 変化率計算
+                change = current - prev
+                pct_change = (change / prev) * 100
+                
+                # アイコンと評価
+                trend_icon = "↗️" if change > 0 else "↘️"
+                
+                # 金利やVIXは「単位」が違うので表示調整
+                if symbol == "^TNX":
+                    val_str = f"{current:.3f}%"
+                elif symbol == "JPY=X":
+                    val_str = f"{current:.2f}円"
+                else:
+                    val_str = f"{current:,.0f}"
+
+                report += f"- {name}: {val_str} ({trend_icon} {pct_change:+.2f}%)\n"
+
+            except Exception:
+                report += f"- {name}: 取得エラー\n"
+
+        # 簡易的な環境判定コメントを追加
+        vix_val = float(df_close["^VIX"].iloc[-1]) if "^VIX" in df_close else 0
+        if vix_val > 30:
+            report += "⚠️ **警告**: VIX指数が30を超えており、市場はパニック状態です。エントリーは極めて慎重に。\n"
+        elif vix_val > 20:
+            report += "⚠️ **注意**: ボラティリティが高まっています。急落に警戒してください。\n"
+        else:
+            report += "✅ 市場心理は比較的落ち着いています。\n"
+
+    except Exception as e:
+        print(f"Macro Data Error: {e}")
+        return "【マクロ環境】データ取得失敗（テクニカルのみで判断します）"
+
+    return report.strip()
 
 def get_latest_news(keyword):
     q = urllib.parse.quote(f"{keyword} 株価 決算")
@@ -276,66 +413,83 @@ def create_chart_image(df, name):
     plt.savefig(buf, format='png', dpi=80); plt.close(fig); buf.seek(0)
     return {"mime_type": "image/png", "data": buf.getvalue()}
 
-def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, name):
+# fundamentals を追加して 8個 にする
+def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, fundamentals, name):
+    """
+    【AI判断】高精度・スナイパー版
+    堅牢さを維持しつつ、「スクイーズ」や「出来高」を見て勝率の高い局面を狙う
+    """
     mech_sl_long = metrics['price'] - (metrics['atr_value'] * 2.0)
     trend_dir = "上昇" if metrics['trend_momentum'] > 0 else "下降"
 
-    vol_limit_msg = ""
+    # ボラティリティ警告
+    vol_msg = ""
     if metrics['entry_volatility'] >= 2.0:
-        vol_limit_msg = "⚠️【禁止事項】現在のボラティリティ(2.0%以上)はリスク許容範囲外です。絶対にBUYしてはいけません。必ずHOLDを選択してください。"
+        vol_msg = "⚠️ 現在ボラティリティが高すぎます(2.0%以上)。新規BUYは禁止。SELL(逃げ)を検討してください。"
 
     prompt = f"""
-あなたは「超低リスク・買い専門のヘッジファンドCIO」です。
-勝率100%を目指すため、リスクの高い局面は全て見送ります。
-今回はテクニカルだけでなく、**ファンダメンタルズ（業績・割安性）も考慮して** 総合判断してください。
+あなたは「百発百中のスナイパー・トレーダー」です。
+「負けないこと」は当然として、**「確実に勝てる局面」だけ** を選び抜いてください。
 
 === 入力情報 ===
-銘柄: {name} (Timeframe: {TIMEFRAME})
+銘柄: {name}
+0. マクロ環境（市場全体の地合い）:
+   {macro}
 
-1. マクロ環境: {macro}
-
-2. テクニカル:
+1. テクニカル分析:
    - トレンド: {trend_dir} (勢い: {metrics['trend_momentum']:.2f})
-   - SMA25乖離: {metrics['sma25_dev']:.2f}%
-   - ボラティリティ: {metrics['entry_volatility']:.2f}%
-   - 統計的SL目安: {mech_sl_long:.0f} 円付近
+   - SMA25乖離: {metrics['sma25_dev']:.2f}% (プラスならSMAより上)
+   - ボラティリティ: {metrics['entry_volatility']:.2f}% (2.0%未満が理想)
+   
+   **【重要指標】**
+   - **BB幅(スクイーズ度)**: {metrics['bb_width']:.2f}% (10%未満はエネルギー充填中)
+   - **出来高倍率**: {metrics['volume_ratio']:.2f}倍 (1.0超えは資金流入)
+   - **RSI(9)**: {metrics['rsi_9']:.1f} (40-60は押し目買いの好機)
 
-3. {fundamentals}
+2. ファンダメンタルズ:
+   {fundamentals}
 
-4. 最新ニュース: {news}
+3. ニュース: {news}
 
 {cbr_text}
 
-=== 鉄の掟 (売買基準) ===
+=== 判断基準 ===
 
-{vol_limit_msg}
+{vol_msg}
 
-1. **【BUY (新規買い)】の絶対条件**
-   - **ボラティリティが 2.0% 未満であること。** (絶対厳守)
-   - SMA25が上向きで、明確な上昇トレンド中であること。
-   - **ファンダメンタルズに致命的な問題がないこと**（極端な割高や赤字など）。
-   - ただし、テクニカル（トレンド）が非常に強い場合は、多少の割高感は許容してよい。
+**【BUY (新規買い) の条件】**
+以下をすべて満たす「黄金パターン」のみエントリーせよ。
+1. **安全性:** ボラティリティが 2.0% 未満であること。
+2. **トレンド:** SMA25が上向きで、価格がSMA25の上にあること。
+3. **エッジ (以下のいずれかがあること):**
+   - **スクイーズからの初動:** BB幅が狭く、かつ出来高が増加傾向にある。
+   - **押し目:** 上昇トレンド中で、RSIが 40〜50 まで調整している。
+   - **好業績:** 割安(PER/PBR低)で、ファンダメンタルズが盤石である。
 
-2. **【HOLD (様子見・利益確定)】**
-   - ボラティリティが 2.0% 以上の場合。
-   - トレンドが崩れている場合。
-   - 業績に対して株価がバブル気味で、下落リスクが高いと判断した場合。
+**【HOLD (様子見・維持)】**
+- トレンドは悪くないが、爆発の予兆（出来高急増など）がない場合。
+- 既に保有している場合は、明確な売りシグナルが出るまで利益を伸ばす。
+
+**【SELL (決済)】**
+- トレンド崩壊、またはボラティリティの急拡大。
 
 === 出力 (JSONのみ) ===
 {{
-  "action": "BUY", "HOLD" のいずれか,
+  "action": "BUY", "HOLD", "SELL" のいずれか,
   "confidence": 0-100,
-  "stop_loss_price": 数値 (HOLDなら0),
-  "stop_loss_reason": "直近安値◯◯円割れ... (30文字以内)",
-  "reason": "ボラティリティ1.5%と低く、PER12倍で割安感もあり、SMA25の押し目... (100文字以内)"
+  "stop_loss_price": 数値,
+  "stop_loss_reason": "直近安値かつATR2倍ライン... (30文字以内)",
+  "reason": "ボラティリティ1.2%と低く、BB幅が収縮した状態で出来高が1.5倍に急増。爆発の初動と判断... (100文字以内)"
 }}
 """
     try:
         response = model_instance.generate_content([prompt, chart])
         text = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(text)
-    except: return {"action": "HOLD", "confidence": 0, "reason": "API Error", "stop_loss_price": 0}
-
+    except Exception as e:
+        # ★エラー内容をコンソールに赤字で表示する
+        print(f"\n⚠️ AI ERROR: {e}") 
+        return {"action": "HOLD", "confidence": 0, "reason": f"API Error: {e}", "stop_loss_price": 0}
 # ==========================================
 # 5. メイン実行 (実戦監視)
 # ==========================================
@@ -397,11 +551,15 @@ if __name__ == "__main__":
         except: sl_price = 0.0
         
         item = {
-            "Date": today, "Ticker": tic, "Timeframe": TIMEFRAME, 
-            "Action": action, "Confidence": conf,
+            "Date": today,
+            "Ticker": tic,
+            "Timeframe": TIMEFRAME, 
+            "Action": action,
+            "result": "",  # ★ここが抜けていました（結果待ちのため空欄）
+            "Reason": res.get('reason', 'None'), 
+            "Confidence": conf,
             "stop_loss_price": sl_price, 
             "stop_loss_reason": res.get('stop_loss_reason', '-'),
-            "Reason": res.get('reason', 'None'), 
             "Price": metrics['price'],
             "sma25_dev": metrics['sma25_dev'], 
             "trend_momentum": metrics['trend_momentum'],
@@ -410,22 +568,38 @@ if __name__ == "__main__":
             "profit_loss": 0
         }
         
+        # ★列の順序をCSVファイルと強制的に合わせる
+        csv_columns = [
+            "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
+            "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
+            "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", "profit_loss"
+        ]
+        
         df_new = pd.DataFrame([item])
+        # 列順序を並べ替え
+        df_new = df_new[csv_columns]
+
         if not os.path.exists(LOG_FILE):
             df_new.to_csv(LOG_FILE, index=False, encoding='utf-8-sig')
         else:
             df_new.to_csv(LOG_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
             
-        action_icon = "BUY 🔴" if action == "BUY" else "HOLD ⚪"
-        print(f"{action_icon}")
+        action_icon = "BUY 🔴" if action == "BUY" else "SELL 🔵(決済)" if action == "SELL" else "HOLD 🟡(維持)"
+        sl_str = f"(SL: {sl_price:.0f})" if action == "BUY" and sl_price > 0 else ""
+        print(f"{action_icon} {conf}% {sl_str}")
 
         if action == "BUY":
             sl_str = f"(SL: {sl_price:.0f}円)" if sl_price > 0 else ""
-            msg = f"🔴 **{tic}** : {metrics['price']:.0f}円 {sl_str}\n> 理由: {res.get('reason')}"
+            msg = f"🔴 **BUY {name}**: {metrics['price']:.0f}円 {sl_str}\n> 理由: {res.get('reason')}"
             buy_list.append(msg)
+            
+        elif action == "SELL":
+            # SELLの場合は「緊急脱出」リストに入れる
+            msg = f"🔵 **SELL (決済) {name}**: {metrics['price']:.0f}円\n> 理由: {res.get('reason')}"
+            buy_list.append(msg) # 通知を目立たせるためbuy_listに入れるか、新しいsell_listを作る
+            
         elif action == "HOLD":
-            hold_list.append(f"⚪ {tic}")
-        
+            hold_list.append(f"🟡 {name}")
         time.sleep(2)
 
     # 通知作成

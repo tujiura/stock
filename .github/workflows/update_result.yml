@@ -1,0 +1,39 @@
+name: Auto Update Trade Result
+
+on:
+  schedule:
+    # 毎週日曜日 日本時間 午前9時 (UTC 0:00) に実行
+    - cron: '0 0 * * 0'
+  workflow_dispatch: # 手動でも実行できるようにするボタン
+
+permissions:
+  contents: write # CSVを更新して保存(Push)するために書き込み権限が必要
+
+jobs:
+  run-updater:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # お使いのバージョンに合わせて調整
+
+      - name: Install dependencies
+        run: |
+          pip install pandas yfinance
+          # もし requirements.txt があるなら: pip install -r requirements.txt
+
+      - name: Run updateresult.py
+        run: python updateresult.py
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add ai_trade_memory_risk_managed.csv
+          # 変更があった場合のみコミットしてプッシュ
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update trade results [Weekly]" && git push)

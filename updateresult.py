@@ -9,24 +9,34 @@ LOG_FILE = "ai_trade_memory_risk_managed.csv"
 HOLD_PERIOD = 5  # 何日後に決済するか（5営業日）
 
 def update_past_results():
-    print("=== 過去のトレード答え合わせ（成績更新） ===")
+    print("=== 過去のトレード答え合わせ（成績更新ツール） ===")
     
     if not os.path.exists(LOG_FILE):
-        print("ファイルが見つかりません。")
+        print(f"エラー: {LOG_FILE} が見つかりません。")
         return
 
     try:
         # CSV読み込み
         df = pd.read_csv(LOG_FILE)
         
-        # 更新対象: Resultが空欄、かつActionがBUY/SELLの行
+        # カラム名の正規化（小文字に統一してから、扱いやすい名前に戻す）
+        # これにより、新旧どちらのフォーマットでも動くようにする
+        rename_map = {
+            'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 
+            'price': 'Price', 'result': 'result', 'profit_loss': 'profit_loss',
+            'stop_loss_price': 'stop_loss_price'
+        }
+        df.columns = [rename_map.get(col.lower(), col) for col in df.columns]
+        
+        # 更新対象: Resultが空欄、かつActionがBUYの行
+        # ※現在のロジックでは「BUY」のみが新規エントリーのため
         target_rows = df[
-            (df['result'].isna() | (df['result'] == '')) & 
-            (df['Action'].isin(['BUY', 'SELL']))
+            (df['result'].isna() | (df['result'] == '') | (df['result'] == 'nan')) & 
+            (df['Action'] == 'BUY')
         ]
         
         if len(target_rows) == 0:
-            print("更新が必要な未確定データはありません。")
+            print("✅ 更新が必要な未確定データはありません。")
             return
 
         print(f"未確定データ: {len(target_rows)}件")
@@ -35,82 +45,77 @@ def update_past_results():
         
         for index, row in target_rows.iterrows():
             ticker = row['Ticker']
-            entry_date_str = row['Date']
-            action = row['Action']
+            entry_date_str = str(row['Date'])
             entry_price = float(row['Price'])
             
             # 損切り価格（あれば取得）
             try: sl_price = float(row['stop_loss_price'])
             except: sl_price = 0.0
 
-            # 日付解析
+            # 日付解析 (YYYY-MM-DD)
             try:
                 entry_date = pd.to_datetime(entry_date_str).date()
             except:
+                print(f"スキップ: 日付形式エラー ({entry_date_str})")
                 continue
 
             # 経過日数が足りているか確認
             days_passed = (datetime.date.today() - entry_date).days
-            if days_passed < 3: # 土日含め最低3日は待つ
+            # 土日含め7日（約5営業日）経過していないと判定できない
+            if days_passed < 7:
                 continue
 
-            print(f"チェック中: {entry_date} {ticker} ({action}) ...", end="")
+            print(f"チェック中: {entry_date} {ticker} ...", end="")
 
             # 株価データ取得（エントリー日から今日まで）
             try:
-                # 少し広めに取る
+                # yfinanceでデータ取得
+                # startはエントリー日、endは今日
                 hist = yf.download(ticker, start=entry_date, progress=False, auto_adjust=True)
                 
-                # マルチインデックス対応
                 if isinstance(hist.columns, pd.MultiIndex):
                     hist.columns = hist.columns.droplevel(1)
                 
-                if len(hist) <= HOLD_PERIOD:
-                    print(" データ不足（まだ期間経過待ち）")
+                # データが少なすぎる場合はスキップ
+                if len(hist) < 2:
+                    print(" データ不足")
                     continue
                 
-                # 判定ロジック
-                # 期間中の安値・高値を取得（損切り判定用）
-                period_data = hist.iloc[1:HOLD_PERIOD+1] # エントリー翌日からN日後まで
+                # 判定期間のデータを抽出（エントリー翌日〜5営業日後まで）
+                # ※ iloc[0]はエントリー当日なので除外
+                period_data = hist.iloc[1:HOLD_PERIOD+1]
                 
+                if period_data.empty:
+                    print(" 期間データなし")
+                    continue
+
+                # 期間中の最安値・最高値・最終価格
                 low_price = period_data['Low'].min()
                 high_price = period_data['High'].max()
-                exit_price = float(period_data.iloc[-1]['Close']) # N日後の終値
+                exit_price = float(period_data.iloc[-1]['Close'])
                 
                 result = "DRAW"
                 final_price = exit_price
                 
-                # --- BUYの場合 ---
-                if action == "BUY":
-                    # 損切りにかかったか？
-                    if sl_price > 0 and low_price <= sl_price:
-                        result = "LOSS"
-                        final_price = sl_price # 損切り価格で決済
-                    # 利確か？
-                    elif exit_price > entry_price * 1.02:
-                        result = "WIN"
-                    elif exit_price < entry_price * 0.98:
-                        result = "LOSS"
-                    else:
-                        result = "DRAW"
+                # --- 勝敗判定ロジック ---
+                # 1. 損切りにかかったか？ (SL設定がある場合)
+                if sl_price > 0 and low_price <= sl_price:
+                    result = "LOSS"
+                    final_price = sl_price # 損切り価格で決済とみなす
+                
+                # 2. 利確か？ (2%以上上昇)
+                elif exit_price > entry_price * 1.02:
+                    result = "WIN"
+                
+                # 3. 負けか？ (2%以上下落)
+                elif exit_price < entry_price * 0.98:
+                    result = "LOSS"
+                
+                # 4. それ以外は引き分け (DRAW)
+                else:
+                    result = "DRAW"
                         
-                    profit = final_price - entry_price
-
-                # --- SELLの場合 ---
-                elif action == "SELL":
-                    # 損切りにかかったか？
-                    if sl_price > 0 and high_price >= sl_price:
-                        result = "LOSS"
-                        final_price = sl_price
-                    # 利確か？
-                    elif exit_price < entry_price * 0.98:
-                        result = "WIN"
-                    elif exit_price > entry_price * 1.02:
-                        result = "LOSS"
-                    else:
-                        result = "DRAW"
-                        
-                    profit = entry_price - final_price # 売りは下がれば利益
+                profit = final_price - entry_price
 
                 # データフレーム更新
                 df.at[index, 'result'] = result
@@ -128,9 +133,9 @@ def update_past_results():
         # 保存
         if updated_count > 0:
             df.to_csv(LOG_FILE, index=False, encoding='utf-8-sig')
-            print(f"✅ {updated_count}件の成績を更新しました！")
+            print(f"\n✅ {updated_count}件の成績を更新し、AIの記憶を強化しました！")
         else:
-            print("今回は更新データなし")
+            print("\n今回は更新可能なデータ（期間経過済み）はありませんでした。")
 
     except Exception as e:
         print(f"全体エラー: {e}")
