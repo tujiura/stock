@@ -37,11 +37,7 @@ def main():
 
     webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
 
-    if webhook_url:
-        print(f"✅ Webhook URL: 設定済み (文字数: {len(webhook_url)})")
-    else:
-        print("❌ Webhook URL: 設定されていません！GitHub Secretsを確認してください。")
-        return
+    
 
     # 2. 通知送信テスト
     print("\n📨 Discordにメッセージを送信中...")
