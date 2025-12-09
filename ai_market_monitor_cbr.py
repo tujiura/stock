@@ -38,9 +38,9 @@ if __name__ == "__main__":
     # ★設定エリア
     # ==========================================
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY").strip()
-    if not GOOGLE_API_KEY:
-        print("エラー: GOOGLE_API_KEY が設定されていません。")
-        exit()
+if not GOOGLE_API_KEY:
+    print("エラー: GOOGLE_API_KEY が設定されていません。")
+    exit()
     # ログファイル名 (リスク管理対応版)
     LOG_FILE = "ai_trade_memory_risk_managed.csv"
     MODEL_NAME = 'models/gemini-3-pro-preview' # 必要に応じて pro 等に変更
