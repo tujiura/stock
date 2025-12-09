@@ -1,8 +1,11 @@
 import os
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import yfinance as yf
 import pandas as pd
-# dotenvはインストールされていなくてもエラーにならないよう処理
+
+# ローカル環境用（GitHub Actionsでは無視されます）
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -10,7 +13,7 @@ except ImportError:
     pass
 
 def main():
-    print("=== 🧪 GitHub Actions 動作確認テスト ===")
+    print("=== 🧪 GitHub Actions 動作確認テスト (リトライ強化版) ===")
     
     # 1. 環境変数のチェック
     print("\n🔍 [1] 環境変数の確認")
@@ -36,23 +39,36 @@ def main():
         
         if not df.empty:
             print("✅ データ取得成功！")
-            print(f"最新株価: {float(df['Close'].iloc[-1]):.0f}円")
+            # 警告回避のためfloat変換
+            price = float(df['Close'].iloc[-1])
+            print(f"最新株価: {price:.0f}円")
         else:
             print("⚠️ データは空でした（通信は成功）")
             
     except Exception as e:
         print(f"❌ データ取得エラー: {e}")
 
-    # 3. LINE通知テスト
+    # 3. LINE通知テスト（ここを強化！）
     print("\n📱 [3] LINE通知テスト")
     if line_token:
+        url = "https://notify-api.line.me/api/notify"
+        headers = {"Authorization": f"Bearer {line_token}"}
+        msg = "\nこれはGitHub Actionsからのテスト通知です。\nリトライ機能で送信成功しました！🚀"
+        
+        # ★リトライ設定（最大5回、間隔をあけて再挑戦）
+        session = requests.Session()
+        retries = Retry(
+            total=5,
+            backoff_factor=2, # 2秒, 4秒, 8秒...と待つ
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["POST"]
+        )
+        session.mount("https://", HTTPAdapter(max_retries=retries))
+
         try:
-            url = "https://notify-api.line.me/api/notify"
-            headers = {"Authorization": f"Bearer {line_token}"}
-            msg = "\nこれはGitHub Actionsからのテスト通知です。\n正常に動作しています！🚀"
-            
-            # タイムアウト設定付きで送信
-            res = requests.post(url, headers=headers, data={"message": msg}, timeout=10)
+            print("LINEサーバーに送信中...")
+            # timeoutを設定して、応答が遅い場合もリトライへ回す
+            res = session.post(url, headers=headers, data={"message": msg}, timeout=20)
             
             if res.status_code == 200:
                 print("✅ LINE送信成功！スマホを確認してください。")
@@ -60,7 +76,7 @@ def main():
                 print(f"❌ 送信失敗 (Status: {res.status_code}): {res.text}")
                 
         except Exception as e:
-            print(f"❌ 通信エラー: {e}")
+            print(f"❌ 通信エラー（リトライ失敗）: {e}")
     else:
         print("⚠️ トークンがないためスキップ")
 
