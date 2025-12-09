@@ -2,10 +2,15 @@ name: LINE Test Run
 
 on:
   schedule:
-    # 日本時間 8:00 (UTC 23:00) に実行
-    # ※ cron形式: 分 時 日 月 曜日 (UTC)
-    - cron: '0 23 * * 1-5'
-  workflow_dispatch: # 手動実行ボタンも有効化
+    # ① 朝06:00 JST (UTC 21:00)
+    # 変わらず日曜〜木曜の夜に実行
+    - cron: '0 21 * * 0-4'
+    
+    # ② 昼11:40 JST (UTC 02:40)  <-- ここを変更しました
+    # 平日(月〜金)の 02:40 に実行
+    - cron: '40 2 * * 1-5'
+    
+  workflow_dispatch: # 手動実行ボタン
 
 permissions:
   contents: write
