@@ -30,7 +30,7 @@ def main():
     print("=== 🧪 Discord 通知テスト (最強版) ===")
     
     # 1. 環境変数のチェック
-    webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
+    webhook_url = os.getenv("DISCORD_WEBHOOK_URL").strip()
     
     if webhook_url:
         print(f"✅ Webhook URL: 設定済み (文字数: {len(webhook_url)})")
