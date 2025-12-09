@@ -551,11 +551,8 @@ if __name__ == "__main__":
         except: sl_price = 0.0
         
         item = {
-            "Date": today,
-            "Ticker": tic,
-            "Timeframe": TIMEFRAME, 
-            "Action": action,
-            "result": "",  # ★ここが抜けていました（結果待ちのため空欄）
+            "Date": today, "Ticker": tic, "Timeframe": TIMEFRAME, 
+            "Action": action, "result": "", # 結果は未確定なので空欄
             "Reason": res.get('reason', 'None'), 
             "Confidence": conf,
             "stop_loss_price": sl_price, 
@@ -568,16 +565,30 @@ if __name__ == "__main__":
             "profit_loss": 0
         }
         
-        # ★列の順序をCSVファイルと強制的に合わせる
+        # カラム順序を強制
         csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
             "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", "profit_loss"
         ]
-        
         df_new = pd.DataFrame([item])
-        # 列順序を並べ替え
+        
+        # 必要なカラムだけで構成（不足があれば追加）
+        for col in csv_columns:
+            if col not in df_new.columns: df_new[col] = None
         df_new = df_new[csv_columns]
+
+        # ★強化版書き込み処理
+        try:
+            if not os.path.exists(LOG_FILE):
+                df_new.to_csv(LOG_FILE, index=False, encoding='utf-8-sig')
+            else:
+                df_new.to_csv(LOG_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
+            print(f"📝 記録完了: {tic}")
+        except PermissionError:
+            print(f"❌【重要】CSVファイルが開かれているため書き込めませんでした！閉じてください。")
+        except Exception as e:
+            print(f"❌ 書き込みエラー: {e}")
 
         if not os.path.exists(LOG_FILE):
             df_new.to_csv(LOG_FILE, index=False, encoding='utf-8-sig')

@@ -20,13 +20,13 @@ except ImportError:
 # ==========================================
 # ★設定エリア
 # ==========================================
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY").strip()
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
     # exit() # 環境によってはコメントアウト
 
 genai.configure(api_key=GOOGLE_API_KEY)
-MODEL_NAME = 'models/gemini-2.0-flash' # コストパフォーマンスの良いモデル推奨
+MODEL_NAME = 'models/gemini-2.5-pro' # コストパフォーマンスの良いモデル推奨
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
 TRAINING_ROUNDS = 20 # 1回の実行で行う回数
@@ -194,7 +194,7 @@ class CaseBasedMemory:
         return text
 
     def save_experience(self, data_dict):
-        # ★重要: CSVの列順序を固定して保存する（列ズレ防止）
+        # 保存するカラムの順序を強制（CSV破損防止）
         csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
@@ -203,21 +203,35 @@ class CaseBasedMemory:
         
         new_df = pd.DataFrame([data_dict])
         
-        # 必要な列がなければNoneで埋める
+        # カラム不足があれば補完し、順序を整える
         for col in csv_columns:
-            if col not in new_df.columns:
-                new_df[col] = None
-        
-        # 列順序を強制
+            if col not in new_df.columns: new_df[col] = None
         new_df = new_df[csv_columns]
 
-        if not os.path.exists(self.csv_path):
-            new_df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
-        else:
-            new_df.to_csv(self.csv_path, mode='a', header=False, index=False, encoding='utf-8-sig')
-        
-        # メモリを再ロード
-        self.load_and_train()
+        # ★強化ポイント: Excelが開いていてもリトライする処理
+        max_retries = 5
+        for i in range(max_retries):
+            try:
+                if not os.path.exists(self.csv_path):
+                    new_df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
+                else:
+                    # 追記モード
+                    new_df.to_csv(self.csv_path, mode='a', header=False, index=False, encoding='utf-8-sig')
+                
+                # 成功したらループを抜ける
+                print(f"   💾 記録しました") 
+                self.load_and_train() # メモリ再読み込み
+                return
+            
+            except PermissionError:
+                if i < max_retries - 1:
+                    print(f"⚠️ CSVがExcel等で開かれています。閉じてください... ({i+1}/{max_retries}回 再試行中)")
+                    time.sleep(3)
+                else:
+                    print("❌ 書き込み失敗: CSVファイルを閉じてから再実行してください。")
+            except Exception as e:
+                print(f"❌ 保存エラー: {e}")
+                break
 
 # ==========================================
 # 3. AIスパーリング (スナイパー版)
