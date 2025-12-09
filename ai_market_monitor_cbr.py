@@ -204,6 +204,40 @@ def get_fundamentals(ticker):
         # どんなエラーが起きても絶対にプログラムを止めない
         return "【ファンダメンタルズ】取得エラー（無視して続行）"
 
+# ==========================================
+# ★追加: 週足トレンド判定関数 (マルチタイムフレーム)
+# ==========================================
+def get_weekly_trend(ticker):
+    """
+    週足データを取得し、中期トレンドを判定する
+    """
+    try:
+        # 過去2年分の週足を取得
+        df = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        
+        if len(df) < 26: return "不明 (データ不足)"
+
+        # SMA13 (約3ヶ月) と SMA26 (約半年) を計算
+        sma13 = df['Close'].rolling(13).mean().iloc[-1]
+        sma26 = df['Close'].rolling(26).mean().iloc[-1]
+        current_price = float(df['Close'].iloc[-1])
+        
+        # 判定ロジック
+        if current_price > sma13 and sma13 > sma26:
+            return "上昇 📈 (最強)"
+        elif current_price > sma13:
+            return "上昇 ↗️ (短期強気)"
+        elif current_price < sma13 and sma13 < sma26:
+            return "下降 📉 (最弱)"
+        elif current_price < sma13:
+            return "下降 ↘️ (調整/下落)"
+        else:
+            return "レンジ ➡️"
+    except:
+        return "取得エラー"
+    
 def calculate_metrics_enhanced(df):
     if len(df) < 25: return None 
     
@@ -414,7 +448,7 @@ def create_chart_image(df, name):
     return {"mime_type": "image/png", "data": buf.getvalue()}
 
 # fundamentals を追加して 8個 にする
-def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, fundamentals, name):
+def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, fundamentals, weekly_trend, name):
     """
     【AI判断】高精度・スナイパー版
     堅牢さを維持しつつ、「スクイーズ」や「出来高」を見て勝率の高い局面を狙う
@@ -440,7 +474,7 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
    - トレンド: {trend_dir} (勢い: {metrics['trend_momentum']:.2f})
    - SMA25乖離: {metrics['sma25_dev']:.2f}% (プラスならSMAより上)
    - ボラティリティ: {metrics['entry_volatility']:.2f}% (2.0%未満が理想)
-   
+    - **週足(中期): {weekly_trend}  
    **【重要指標】**
    - **BB幅(スクイーズ度)**: {metrics['bb_width']:.2f}% (10%未満はエネルギー充填中)
    - **出来高倍率**: {metrics['volume_ratio']:.2f}倍 (1.0超えは資金流入)
@@ -517,7 +551,9 @@ if __name__ == "__main__":
         if df is None or len(df) < 100:
             print("Skip")
             continue
-            
+
+        weekly_trend = get_weekly_trend(tic)
+           
         df['SMA25'] = df['Close'].rolling(25).mean()
         df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
         df['Signal'] = df['MACD'].ewm(span=9).mean()
@@ -542,7 +578,7 @@ if __name__ == "__main__":
         fundamentals = get_fundamentals(name)
         
         # analyze_vision_agent に fundamentals を渡すように変更します（次のステップで関数側も変更）
-        res = analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, fundamentals, name)  
+        res = analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, fundamentals, weekly_trend, name)  
               
         action = res.get('action', 'HOLD')
         conf = res.get('confidence', 0)
