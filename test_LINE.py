@@ -1,27 +1,25 @@
 import os
-import sys # 追加
+import sys
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import yfinance as yf
-import pandas as pd
 import socket
 import requests.packages.urllib3.util.connection as urllib3_cn
 
 # ---------------------------------------------------------
 # ★【Windows対策】文字コードをUTF-8に強制する
-# これがないとWindows環境で日本語や絵文字を表示する際にエラーになります
-sys.stdout.reconfigure(encoding='utf-8')
 # ---------------------------------------------------------
+sys.stdout.reconfigure(encoding='utf-8')
 
 # ---------------------------------------------------------
 # ★【通信対策】IPv6を無効化し、強制的にIPv4を使用させます
+# ---------------------------------------------------------
 def allowed_gai_family():
     return socket.AF_INET
 
 urllib3_cn.allowed_gai_family = allowed_gai_family
-# ---------------------------------------------------------
 
+# ローカル環境用（GitHub Actionsでは無視されます）
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -29,64 +27,49 @@ except ImportError:
     pass
 
 def main():
-    print("=== 🧪 GitHub Actions 動作確認テスト (Windows対応版) ===")
+    print("=== 🧪 Discord 通知テスト (最強版) ===")
     
     # 1. 環境変数のチェック
-    print("\n🔍 [1] 環境変数の確認")
-    google_key = os.getenv("GOOGLE_API_KEY")
-    line_token = os.getenv("LINE_TOKEN")
+    webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
     
-    if google_key:
-        print(f"✅ GOOGLE_API_KEY: OK (文字数: {len(google_key)})")
+    if webhook_url:
+        print(f"✅ Webhook URL: 設定済み (文字数: {len(webhook_url)})")
     else:
-        print("❌ GOOGLE_API_KEY: 設定されていません")
-        
-    if line_token:
-        print(f"✅ LINE_TOKEN: OK (文字数: {len(line_token)})")
-    else:
-        print("❌ LINE_TOKEN: 設定されていません")
+        print("❌ Webhook URL: 設定されていません！GitHub Secretsを確認してください。")
+        return
 
-    # 2. 外部通信＆データ取得テスト
-    print("\n📡 [2] 株価データ取得テスト (yfinance)")
-    ticker = "7203.T"
+    # 2. 通知送信テスト
+    print("\n📨 Discordにメッセージを送信中...")
+    
+    # 送信データ（JSON形式）
+    payload = {
+        "content": "✅ **テスト成功！**\nGitHub Actionsからの通知テストです。\nこのメッセージが見えていれば、設定は完璧です！🚀",
+        "username": "AI投資アドバイザー(テスト)",
+        "avatar_url": "https://cdn-icons-png.flaticon.com/512/4228/4228956.png"
+    }
+
+    # リトライ設定（通信を頑丈にする）
+    session = requests.Session()
+    retries = Retry(
+        total=5,
+        backoff_factor=2,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["POST"]
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+
     try:
-        print(f"銘柄 {ticker} にアクセス中...")
-        df = yf.download(ticker, period="1d", interval="1d", progress=False)
+        # Discordは json=payload で送るのがポイント
+        res = session.post(webhook_url, json=payload, timeout=10)
         
-        if not df.empty:
-            print("✅ データ取得成功！")
-            price = float(df['Close'].iloc[-1])
-            print(f"最新株価: {price:.0f}円")
+        if 200 <= res.status_code < 300:
+            print("✅ 送信成功！Discordの画面を確認してください。")
         else:
-            print("⚠️ データは空でした")
+            print(f"❌ 送信失敗 (Status: {res.status_code})")
+            print(f"エラー内容: {res.text}")
             
     except Exception as e:
-        print(f"❌ データ取得エラー: {e}")
-
-    # 3. LINE通知テスト
-    print("\n📱 [3] LINE通知テスト")
-    if line_token:
-        url = "https://notify-api.line.me/api/notify"
-        headers = {"Authorization": f"Bearer {line_token}"}
-        msg = "\nこれはGitHub Actions(Windows)からのテスト通知です。\nついに成功しました！🚀"
-        
-        session = requests.Session()
-        retries = Retry(total=5, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
-        session.mount("https://", HTTPAdapter(max_retries=retries))
-
-        try:
-            print("LINEサーバーに送信中...")
-            res = session.post(url, headers=headers, data={"message": msg}, timeout=20)
-            
-            if res.status_code == 200:
-                print("✅ LINE送信成功！スマホを確認してください。")
-            else:
-                print(f"❌ 送信失敗 (Status: {res.status_code}): {res.text}")
-                
-        except Exception as e:
-            print(f"❌ 通信エラー: {e}")
-    else:
-        print("⚠️ トークンがないためスキップ")
+        print(f"❌ 通信エラー発生: {e}")
 
     print("\n=== ✨ テスト終了 ===")
 
