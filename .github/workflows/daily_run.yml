@@ -2,9 +2,9 @@ name: Daily AI Trade
 
 on:
   schedule:
-    # 日本時間 8:30 (UTC 23:30) に実行
+    # 日本時間 8:00 (UTC 23:00) に実行
     # ※ cron形式: 分 時 日 月 曜日 (UTC)
-    - cron: '30 23 * * 1-5'
+    - cron: '0 23 * * 1-5'
   workflow_dispatch: # 手動実行ボタンも有効化
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
         run: |
-          python main.py
+          python training_final.py
 
       - name: Commit and Push CSV updates
         # トレード結果(CSV)をリポジトリに保存して、AIの記憶を更新する
