@@ -44,7 +44,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
     exit()
-webhook_url = os.getenv("DISCORD_WEBHOOK_URL").strip()
+webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
 genai.configure(api_key=GOOGLE_API_KEY)
 
 LOG_FILE = "ai_trade_memory_risk_managed.csv"

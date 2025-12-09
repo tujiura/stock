@@ -28,7 +28,7 @@ try:
 except ImportError:
     pass
 
-webhook_url = os.getenv("DISCORD_WEBHOOK_URL").strip()
+webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
 
 def main():
     print("=== 🧪 Discord 通知テスト (最強版) ===")
