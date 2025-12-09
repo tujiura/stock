@@ -56,6 +56,11 @@ if df_raw is None or len(df_raw) == 0:
 # ==========================================
 st.sidebar.header("🔍 検索フィルタ")
 
+# キャッシュクリアボタン
+if st.sidebar.button("🔄 データを更新"):
+    st.cache_data.clear()
+    st.rerun()
+    
 # 銘柄フィルタ
 tickers = ["ALL"] + list(df_raw['Ticker'].unique())
 selected_ticker = st.sidebar.selectbox("銘柄を選択", tickers)
