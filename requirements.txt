@@ -6,3 +6,9 @@ scikit-learn
 matplotlib
 requests
 python-dotenv
+streamlit
+pandas
+plotly
+yfinance
+google-generativeai
+python-dotenv

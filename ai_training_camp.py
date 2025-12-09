@@ -20,7 +20,7 @@ except ImportError:
 # ==========================================
 # ★設定エリア
 # ==========================================
-GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY").strip()
+GOOGLE_API_KEY = os.getenv("TRAIN_API_KEY").strip()
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
     # exit() # 環境によってはコメントアウト
@@ -29,7 +29,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.5-pro' # コストパフォーマンスの良いモデル推奨
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
-TRAINING_ROUNDS = 20 # 1回の実行で行う回数
+TRAINING_ROUNDS = 100 # 1回の実行で行う回数
 TIMEFRAME = "1d" 
 CBR_NEIGHBORS_COUNT = 11
 MIN_VOLATILITY = 1.0 
@@ -282,7 +282,7 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
 {vol_msg}
 
 **【BUY 🔴: 新規買い（高勝率チャンス）】**
-以下をすべて満たす「黄金パターン」のみエントリーせよ。
+以下をすべて満たす「黄金パターン」を念頭においてエントリーせよ。
 1. **安全性:** ボラティリティが 2.0% 未満であること。
 2. **トレンド:** SMA25が上向きで、価格がSMA25の上にあること。
 3. **エッジ (以下のいずれかがあること):**
@@ -296,6 +296,7 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
 **【SELL 🔵: 決済・逃げ（手仕舞いの合図）】**
 - トレンド崩壊、またはボラティリティの急拡大。
 - ※空売りではなく「保有ポジションの決済（逃げ）」の合図として判断すること。
+- リスク回避を最優先し、負けないことを最重要視せよ。
 
 === 出力 (JSONのみ) ===
 {{
