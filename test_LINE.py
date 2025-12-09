@@ -19,8 +19,6 @@ def allowed_gai_family():
 
 urllib3_cn.allowed_gai_family = allowed_gai_family
 
-
-
 # ローカル環境用（GitHub Actionsでは無視されます）
 try:
     from dotenv import load_dotenv
@@ -28,16 +26,17 @@ try:
 except ImportError:
     pass
 
-
-
 def main():
     print("=== 🧪 Discord 通知テスト (最強版) ===")
     
     # 1. 環境変数のチェック
-
     webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
-
     
+    if webhook_url:
+        print(f"✅ Webhook URL: 設定済み (文字数: {len(webhook_url)})")
+    else:
+        print("❌ Webhook URL: 設定されていません！GitHub Secretsを確認してください。")
+        return
 
     # 2. 通知送信テスト
     print("\n📨 Discordにメッセージを送信中...")
