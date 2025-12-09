@@ -1,0 +1,42 @@
+name: Daily AI Trade
+
+on:
+  schedule:
+    # 日本時間 8:30 (UTC 23:30) に実行
+    # ※ cron形式: 分 時 日 月 曜日 (UTC)
+    - cron: '30 23 * * 1-5'
+  workflow_dispatch: # 手動実行ボタンも有効化
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run AI Trading Bot
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+        run: |
+          python main.py
+
+      - name: Commit and Push CSV updates
+        # トレード結果(CSV)をリポジトリに保存して、AIの記憶を更新する
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git add ai_trade_memory_risk_managed.csv
+          # 変更がある場合のみコミット
+          git commit -m "Update trade memory [skip ci]" || echo "No changes to commit"
+          git push
