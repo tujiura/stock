@@ -13,24 +13,24 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from dotenv import load_dotenv
 
+# 環境変数の読み込み
 load_dotenv()
 
 # ==========================================
 # ★設定エリア
 # ==========================================
-GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY").strip()
-genai.configure(api_key=GOOGLE_API_KEY)
-if not GOOGLE_API_KEY:
+GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY") or "あなたのAPIキーを直接ここに書いてもOK"
+if not GOOGLE_API_KEY or "APIキー" in GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
     exit()
+
+genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.5-pro' 
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
 TRAINING_ROUNDS = 50
 TIMEFRAME = "1d" 
 CBR_NEIGHBORS_COUNT = 11
-
-# ★低ボラティリティ足切りライン (これ未満は取引しない)
 MIN_VOLATILITY = 1.0 
 
 TRAINING_LIST = [
@@ -112,7 +112,7 @@ def calculate_technical_indicators(df):
     return df.dropna()
 
 # ==========================================
-# 2. CBRメモリシステム (カラム名統一 & 堅牢化)
+# 2. CBRメモリシステム
 # ==========================================
 class CaseBasedMemory:
     def __init__(self, csv_path):
@@ -128,7 +128,6 @@ class CaseBasedMemory:
         try:
             self.df = pd.read_csv(self.csv_path)
             
-            # カラム名を統一 (CSV内が小文字でも大文字始まりに変換)
             rename_map = {
                 'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 
                 'reason': 'Reason', 'timeframe': 'Timeframe', 
@@ -136,7 +135,6 @@ class CaseBasedMemory:
                 'stop_loss_reason': 'stop_loss_reason',
                 'result': 'result', 'profit_loss': 'profit_loss'
             }
-            # 小文字にしてからマッピングを適用
             self.df.columns = [rename_map.get(col.lower(), col) for col in self.df.columns]
             
             if len(self.df) < 5: return
@@ -162,38 +160,28 @@ class CaseBasedMemory:
         distances, indices = self.knn.kneighbors(scaled_vec)
         
         text = f"【類似過去事例 ({len(indices[0])}件)】\n"
-        text += "※注意: 過去に「逆張り」で失敗している場合は、今回は「順張り」を検討せよ。\n"
-        text += "--------------------------------------------------\n"
-        
         for idx in indices[0]:
             row = self.df.iloc[idx]
             icon = "WIN ⭕" if row['result'] == 'WIN' else "LOSS ❌" if row['result'] == 'LOSS' else "➖"
-            act = row.get('Action', '?')
-            text += f"● {row['Date']} {row['Ticker']} [{act}] -> {icon}\n"
-            text += f"   乖離:{row['sma25_dev']:.1f}%, 勢い:{row['trend_momentum']:.1f}\n"
-            
-            sl_price = row.get('stop_loss_price', 0)
-            try: sl_price = float(sl_price)
-            except: sl_price = 0.0
-                
-            if sl_price > 0:
-                text += f"   SL:{sl_price:.0f} (理由: {str(row.get('stop_loss_reason', ''))[:20]}...)\n"
-            else:
-                text += f"   理由: {str(row.get('Reason', ''))[:40]}...\n"
-        
-        text += "--------------------------------------------------\n"
+            text += f"● {row['Date']} {row['Ticker']} -> {icon}\n"
         return text
 
     def save_experience(self, data_dict):
-        new_row = pd.DataFrame([data_dict])
         if not os.path.exists(self.csv_path):
+            new_row = pd.DataFrame([data_dict])
             new_row.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
         else:
+            existing_df = pd.read_csv(self.csv_path, nrows=0)
+            expected_cols = existing_df.columns.tolist()
+            new_row = pd.DataFrame([data_dict])
+            for col in expected_cols:
+                if col not in new_row.columns: new_row[col] = None
+            new_row = new_row[expected_cols]
             new_row.to_csv(self.csv_path, mode='a', header=False, index=False, encoding='utf-8-sig')
         self.load_and_train()
 
 # ==========================================
-# 3. AIスパーリング (順張り特化型)
+# 3. AIスパーリング (★ここが重要：防御型プロンプト)
 # ==========================================
 def create_chart_image(df, ticker_name):
     data = df.tail(100).copy()
@@ -211,8 +199,7 @@ def create_chart_image(df, ticker_name):
 def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text):
     # トレンド方向の判定
     trend_dir = "上昇" if metrics['trend_momentum'] > 0 else "下降"
-    mech_sl_long = metrics['price'] - (metrics['atr_value'] * 2.0)
-
+    
     # ★超厳格フィルタ：ボラティリティ2.0%以上は即HOLD
     vol_limit_msg = ""
     if metrics['entry_volatility'] >= 2.0:
@@ -258,6 +245,7 @@ SMA25乖離率: {metrics['sma25_dev']:.2f}%
         text_clean = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(text_clean)
     except Exception as e:
+        # エラー時はHOLDを返す（安全策）
         return {"action": "HOLD", "reason": f"Error: {e}", "confidence": 0, "stop_loss_price": 0}
 
 # ==========================================
@@ -305,6 +293,7 @@ def main():
         
         print(f"Round {i:03}: {ticker} ({current_date_str}) Vol:{metrics['entry_volatility']:.1f}% ... ", end="", flush=True)
         
+        # AI判断（ここで先ほどの関数を呼ぶ）
         decision = ai_decision_maker(model_instance, chart_bytes, metrics, similar_cases_text)
         action = decision.get('action', 'HOLD')
         
@@ -317,7 +306,6 @@ def main():
             try: sl_price = float(sl_price_raw)
             except: sl_price = 0.0
 
-            # 結果判定（SL考慮）
             period_low = df.iloc[target_idx+1 : target_idx+6]['Low'].min()
             period_high = df.iloc[target_idx+1 : target_idx+6]['High'].max()
             result = "DRAW"
@@ -327,11 +315,7 @@ def main():
                     result = "LOSS"; future_price = sl_price
                 elif future_price > curr_price * 1.02: result = "WIN"
                 elif future_price < curr_price * 0.98: result = "LOSS"
-            elif action == "SELL":
-                if sl_price > 0 and period_high >= sl_price:
-                    result = "LOSS"; future_price = sl_price
-                elif future_price < curr_price * 0.98: result = "WIN"
-                elif future_price > curr_price * 1.02: result = "LOSS"
+            # SELLは削除済みだが念のため残してもOK（条件分岐に入らないだけ）
             
             icon = "⭕" if result == "WIN" else "❌" if result == "LOSS" else "➖"
             print(f"{action} -> {icon} ({result}) | SL:{sl_price:.0f}")
