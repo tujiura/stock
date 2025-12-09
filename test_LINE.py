@@ -1,4 +1,5 @@
 import os
+import sys # 追加
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -8,9 +9,13 @@ import socket
 import requests.packages.urllib3.util.connection as urllib3_cn
 
 # ---------------------------------------------------------
-# ★【重要】GitHub Actionsでの通信エラーを防ぐおまじない
-# IPv6を無効化し、強制的にIPv4を使用させます
+# ★【Windows対策】文字コードをUTF-8に強制する
+# これがないとWindows環境で日本語や絵文字を表示する際にエラーになります
+sys.stdout.reconfigure(encoding='utf-8')
 # ---------------------------------------------------------
+
+# ---------------------------------------------------------
+# ★【通信対策】IPv6を無効化し、強制的にIPv4を使用させます
 def allowed_gai_family():
     return socket.AF_INET
 
@@ -24,7 +29,7 @@ except ImportError:
     pass
 
 def main():
-    print("=== 🧪 GitHub Actions 動作確認テスト (IPv4強制版) ===")
+    print("=== 🧪 GitHub Actions 動作確認テスト (Windows対応版) ===")
     
     # 1. 環境変数のチェック
     print("\n🔍 [1] 環境変数の確認")
@@ -63,7 +68,7 @@ def main():
     if line_token:
         url = "https://notify-api.line.me/api/notify"
         headers = {"Authorization": f"Bearer {line_token}"}
-        msg = "\nこれはGitHub Actionsからのテスト通知です。\nIPv4強制モードで成功しました！🚀"
+        msg = "\nこれはGitHub Actions(Windows)からのテスト通知です。\nついに成功しました！🚀"
         
         session = requests.Session()
         retries = Retry(total=5, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
