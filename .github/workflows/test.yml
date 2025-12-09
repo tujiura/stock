@@ -1,4 +1,4 @@
-name: Daily AI Trade
+name: LINE Test Run
 
 on:
   schedule:
@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: write
-  
+
 jobs:
   build:
     runs-on: ubuntu-latest
