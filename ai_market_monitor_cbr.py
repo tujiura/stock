@@ -529,9 +529,15 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
 # ==========================================
 # 5. メイン実行 (実戦監視)
 # ==========================================
+# ==========================================
+# 5. メイン実行 (実戦監視)
+# ==========================================
 if __name__ == "__main__":
     today = datetime.datetime.now().strftime('%Y-%m-%d')
     print(f"=== AI市場監視システム ({today}) ===")
+    
+    # ★追加: 監視リストの重複排除とソート
+    WATCH_LIST = sorted(list(set(WATCH_LIST)))
     
     try:
         model_instance = genai.GenerativeModel(MODEL_NAME)
@@ -540,22 +546,28 @@ if __name__ == "__main__":
 
     cbr = CaseBasedMemory(LOG_FILE)
     macro = get_macro_data()
+    print(macro)
     
-    report_message = f"**📊 AI市場監視レポート ({today})**\n"
+    report_message = f"**📊 AI市場監視レポート ({today})**\n\n{macro}\n"
     buy_list = []
-    hold_list = []
+    
+    # 保存先ファイルの定義
+    SAVE_TARGETS = [
+        {"path": LOG_FILE, "name": "学習メモリ"},
+        {"path": REAL_TRADE_LOG_FILE, "name": "実戦ログ"}
+    ]
 
     for i, tic in enumerate(WATCH_LIST, 1):
         name = tic 
         print(f"[{i}/{len(WATCH_LIST)}] {name}... ", end="", flush=True)
         
+        # --- (中略) データ取得やAI分析のコードはそのまま ---
+        
         df = download_data_safe(tic, interval=TIMEFRAME)
         if df is None or len(df) < 100:
             print("Skip")
             continue
-
-        weekly_trend = get_weekly_trend(tic)
-           
+            
         df['SMA25'] = df['Close'].rolling(25).mean()
         df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
         df['Signal'] = df['MACD'].ewm(span=9).mean()
@@ -575,12 +587,11 @@ if __name__ == "__main__":
         cbr_text = cbr.search_similar_cases(metrics)
         chart = create_chart_image(df, name)
         news = get_latest_news(name)
-        
-        # ★追加: ここでファンダメンタルズを取得
         fundamentals = get_fundamentals(name)
+        weekly_trend = get_weekly_trend(name) # ★追加済みなら
         
-        # analyze_vision_agent に fundamentals を渡すように変更します（次のステップで関数側も変更）
-        res = analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, fundamentals, weekly_trend, name)  
+        # AI分析実行
+        res = analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, fundamentals, weekly_trend, name)
               
         action = res.get('action', 'HOLD')
         conf = res.get('confidence', 0)
@@ -588,9 +599,10 @@ if __name__ == "__main__":
         try: sl_price = float(sl_price_raw)
         except: sl_price = 0.0
         
+        # --- 保存用データの作成 ---
         item = {
             "Date": today, "Ticker": tic, "Timeframe": TIMEFRAME, 
-            "Action": action, "result": "", # 結果は未確定なので空欄
+            "Action": action, "result": "", 
             "Reason": res.get('reason', 'None'), 
             "Confidence": conf,
             "stop_loss_price": sl_price, 
@@ -603,50 +615,55 @@ if __name__ == "__main__":
             "profit_loss": 0
         }
         
-        # カラム順序を強制
         csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
             "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", "profit_loss"
         ]
-        df_new = pd.DataFrame([item])
         
-        # 必要なカラムだけで構成（不足があれば追加）
+        df_new = pd.DataFrame([item])
+        # カラム順序の強制
         for col in csv_columns:
             if col not in df_new.columns: df_new[col] = None
         df_new = df_new[csv_columns]
 
-        # ★強化版書き込み処理
-        try:
-            if not os.path.exists(LOG_FILE):
-                df_new.to_csv(LOG_FILE, index=False, encoding='utf-8-sig')
-            else:
-                df_new.to_csv(LOG_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
-            print(f"📝 記録完了: {tic}")
-        except PermissionError:
-            print(f"❌【重要】CSVファイルが開かれているため書き込めませんでした！閉じてください。")
-        except Exception as e:
-            print(f"❌ 書き込みエラー: {e}")
+        # --- ★修正: 重複チェック付き保存処理 ---
+        for target in SAVE_TARGETS:
+            path = target["path"]
+            name_label = target["name"]
+            
+            try:
+                # 既存ファイルの読み込みと重複チェック
+                if os.path.exists(path):
+                    try:
+                        df_exist = pd.read_csv(path, on_bad_lines='skip')
+                        # 「同じ日付」かつ「同じ銘柄」のデータが既にあるか確認
+                        is_duplicate = ((df_exist['Date'] == today) & (df_exist['Ticker'] == tic)).any()
+                        
+                        if is_duplicate:
+                            # 重複があれば保存しない（コンソールに小さく表示）
+                            # print(f"({name_label}: 済)", end=" ")
+                            pass 
+                        else:
+                            df_new.to_csv(path, mode='a', header=False, index=False, encoding='utf-8-sig')
+                            print(f"📝 {name_label}保存", end=" ")
+                    except:
+                        # 読み込みエラー等の場合は強制追記（安全策）
+                        df_new.to_csv(path, mode='a', header=False, index=False, encoding='utf-8-sig')
+                else:
+                    # 新規作成
+                    df_new.to_csv(path, index=False, encoding='utf-8-sig')
+                    print(f"🆕 {name_label}作成", end=" ")
+                    
+            except PermissionError:
+                print(f"❌{name_label}ロック中", end=" ")
+            except Exception as e:
+                print(f"❌{name_label}エラー:{e}", end=" ")
 
-        try:
-            if not os.path.exists(REAL_TRADE_LOG_FILE):
-                df_new.to_csv(REAL_TRADE_LOG_FILE, index=False, encoding='utf-8-sig')
-            else:
-                df_new.to_csv(REAL_TRADE_LOG_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
-            print(f"🗂️ 実戦ログ保存: {tic}")
-        except PermissionError:
-            print(f"❌【実戦用】CSVが開かれています。閉じてください。")
-        except Exception as e:
-            print(f"❌【実戦用】保存エラー: {e}")
-            
-        if not os.path.exists(LOG_FILE):
-            df_new.to_csv(LOG_FILE, index=False, encoding='utf-8-sig')
-        else:
-            df_new.to_csv(LOG_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
-            
-        action_icon = "BUY 🔴" if action == "BUY" else "SELL 🔵(決済)" if action == "SELL" else "HOLD 🟡(維持)"
+        # --- コンソール表示 ---
+        action_icon = "🔴" if action == "BUY" else "🔵" if action == "SELL" else "🟡"
         sl_str = f"(SL: {sl_price:.0f})" if action == "BUY" and sl_price > 0 else ""
-        print(f"{action_icon} {conf}% {sl_str}")
+        print(f"-> {action_icon} {conf}% {sl_str}")
 
         if action == "BUY":
             sl_str = f"(SL: {sl_price:.0f}円)" if sl_price > 0 else ""
@@ -654,38 +671,27 @@ if __name__ == "__main__":
             buy_list.append(msg)
             
         elif action == "SELL":
-            # SELLの場合は「緊急脱出」リストに入れる
             msg = f"🔵 **SELL (決済) {name}**: {metrics['price']:.0f}円\n> 理由: {res.get('reason')}"
-            buy_list.append(msg) # 通知を目立たせるためbuy_listに入れるか、新しいsell_listを作る
+            buy_list.append(msg)
             
-        elif action == "HOLD":
-            hold_list.append(f"🟡 {name}")
         time.sleep(2)
 
     # 通知作成
     if buy_list:
-        report_message += "\n🚀 **新規BUY銘柄**\n" + "\n\n".join(buy_list)
+        report_message += "\n🚀 **新規BUY/SELL銘柄**\n" + "\n\n".join(buy_list)
     else:
-        report_message += "\n💤 本日は「BUY」銘柄はありませんでした。"
-
-    if hold_list:
-        report_message += f"\n\n☕ **HOLD銘柄 ({len(hold_list)}件)**\n"
-        report_message += ", ".join(hold_list)
+        report_message += "\n💤 本日は「BUY/SELL」銘柄はありませんでした。"
 
     # Discord送信
     send_discord_notify(report_message)
 
-    # --- ★追加: テキストファイルとして保存する処理 ---
+    # レポート保存
     try:
-        report_dir = "reports" # 保存するフォルダ名
-        os.makedirs(report_dir, exist_ok=True) # フォルダがなければ作成
-        
+        report_dir = "reports"
+        os.makedirs(report_dir, exist_ok=True)
         file_path = os.path.join(report_dir, "latest_report.txt")
-        
-        # "w"モードで開くことで、毎回上書き保存されます
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(report_message)
-        print(f"✅ メッセージをファイルに保存しました: {file_path}")
+        print(f"✅ レポート保存: {file_path}")
     except Exception as e:
         print(f"⚠️ ファイル保存エラー: {e}")
-    # ---------------------------------------------------
