@@ -34,11 +34,10 @@ def load_data():
         # ファイル読み込み
         df = pd.read_csv(DATA_FILE, on_bad_lines='skip')
         
-        # 1. カラム名の空白削除（" Ticker " -> "Ticker"）
+        # 1. カラム名の空白削除
         df.columns = [c.strip() for c in df.columns]
         
-        # 2. カラム名の正規化（小文字 -> 大文字変換）
-        # これにより "ticker" でも "Ticker" でも読み込めるようになります
+        # 2. カラム名の正規化
         rename_map = {
             'ticker': 'Ticker', 'date': 'Date', 'timeframe': 'Timeframe',
             'action': 'Action', 'result': 'result', 'price': 'Price',
@@ -49,11 +48,16 @@ def load_data():
             new_cols.append(rename_map.get(col.lower(), col))
         df.columns = new_cols
         
+        # ★追加: Date列を日付型に強制変換
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            # 変換に失敗した行（NaT）があれば削除しておくのが安全
+            df = df.dropna(subset=['Date'])
+
         return df
     except Exception as e:
         st.error(f"ファイル読み込みエラー: {e}")
         return pd.DataFrame()
-
 # データをロード
 df_raw = load_data()
 
