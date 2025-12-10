@@ -18,6 +18,8 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 import socket
 import requests.packages.urllib3.util.connection as urllib3_cn
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+
 
 # ---------------------------------------------------------
 # ★環境設定
@@ -290,17 +292,13 @@ def create_chart_image(df, name):
     return {"mime_type": "image/png", "data": buf.getvalue()}
 
 def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, fundamentals, weekly_trend, name):
-    """
-    【AI判断】高精度・スナイパー版
-    堅牢さを維持しつつ、「スクイーズ」や「出来高」を見て勝率の高い局面を狙う
-    """
-    
+    # トレンド方向の判定
     trend_dir = "上昇" if metrics['trend_momentum'] > 0 else "下降"
-
+    
     # ボラティリティ警告
     vol_msg = ""
     if metrics['entry_volatility'] >= 2.0:
-        vol_msg = "⚠️ 現在ボラティリティが高すぎます(2.0%以上)。新規BUYは禁止。SELL(逃げ)を検討してください。"
+        vol_msg = "⚠️ 現在ボラティリティが高すぎます(2.0%以上)。新規BUYは禁止。HOLDを選択してください。"
 
     prompt = f"""
 あなたは「百発百中のスナイパー・トレーダー」です。
@@ -308,14 +306,16 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
 
 === 入力情報 ===
 銘柄: {name}
-0. マクロ環境（市場全体の地合い）:
+
+0. マクロ・環境認識:
    {macro}
 
 1. テクニカル分析:
-   - トレンド: {trend_dir} (勢い: {metrics['trend_momentum']:.2f})
+   - **週足(中期): {weekly_trend}**
+   - 日足(短期): {trend_dir} (勢い: {metrics['trend_momentum']:.2f})
    - SMA25乖離: {metrics['sma25_dev']:.2f}% (プラスならSMAより上)
    - ボラティリティ: {metrics['entry_volatility']:.2f}% (2.0%未満が理想)
-    - **週足(中期): {weekly_trend}  
+
    **【重要指標】**
    - **BB幅(スクイーズ度)**: {metrics['bb_width']:.2f}% (10%未満はエネルギー充填中)
    - **出来高倍率**: {metrics['volume_ratio']:.2f}倍 (1.0超えは資金流入)
@@ -323,8 +323,6 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
 
 2. ファンダメンタルズ:
    {fundamentals}
-
-3. ニュース: {news}
 
 {cbr_text}
 
@@ -353,38 +351,43 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
 {{
   "action": "BUY", "HOLD", "SELL" のいずれか,
   "confidence": 0-100,
-  "stop_loss_price": 数値,
-  "stop_loss_reason": "直近安値かつATR2倍ライン... (30文字以内)",
-  "reason": "ボラティリティ1.2%と低く、BB幅が収縮した状態で出来高が1.5倍に急増。爆発の初動と判断... (100文字以内)"
+  "stop_loss_price": 数値 (HOLDなら0),
+  "stop_loss_reason": "直近安値◯◯円割れ... (30文字以内)",
+  "reason": "ボラティリティ1.5%と低く、BB幅が収縮した状態で出来高が1.5倍に急増。爆発の初動と判断... (100文字以内)"
 }}
 """
-    try:
-        response = model_instance.generate_content([prompt, chart])
-        text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
-    except Exception as e:
-        # ★エラー内容をコンソールに赤字で表示する
-        print(f"\n⚠️ AI ERROR: {e}") 
-        return {"action": "HOLD", "confidence": 0, "reason": f"API Error: {e}", "stop_loss_price": 0}
-    try:
-        response = model_instance.generate_content([prompt, chart])
-        text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
-    except Exception as e:
-        print(f"\n⚠️ AI ERROR: {e}") 
-        return {"action": "HOLD", "confidence": 0, "reason": f"API Error: {e}", "stop_loss_price": 0}
+    # ★追加: 安全設定（金融情報の誤ブロックを防ぐ）
+    safety_settings = {
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+    }
 
-def send_discord_notify(message):
-    if not webhook_url: return
     try:
-        chunk_size = 1900
-        for i in range(0, len(message), chunk_size):
-            chunk = message[i:i+chunk_size]
-            requests.post(webhook_url, json={"content": chunk})
-            time.sleep(1)
-        print("✅ Discord通知送信")
+        # generate_content に safety_settings を渡す
+        response = model_instance.generate_content(
+            [prompt, chart],
+            safety_settings=safety_settings
+        )
+        
+        # ★追加: レスポンスが空でないかチェック
+        if not response.parts:
+            # ブロックされた場合の理由を取得（デバッグ用）
+            finish_reason = "Unknown"
+            if response.candidates:
+                finish_reason = response.candidates[0].finish_reason
+            
+            print(f"⚠️ AI Blocked: Reason={finish_reason}")
+            # 強制的にHOLD扱いにする
+            return {"action": "HOLD", "confidence": 0, "reason": "AI生成がブロックされました(Safety/Other)", "stop_loss_price": 0}
+
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
+
     except Exception as e:
-        print(f"⚠️ Discord送信エラー: {e}")
+        print(f"\n⚠️ AI ERROR: {e}") 
+        return {"action": "HOLD", "confidence": 0, "reason": f"API Error: {e}", "stop_loss_price": 0}
 
 # ==========================================
 # 5. メイン実行 (実戦監視)
