@@ -11,7 +11,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import os
 import io
-import sys
+import sys 
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.neighbors import NearestNeighbors
@@ -297,63 +297,77 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
     
     # ボラティリティ警告
     vol_msg = ""
-    if metrics['entry_volatility'] >= 2.0:
-        vol_msg = "⚠️ 現在ボラティリティが高すぎます(2.0%以上)。新規BUYは禁止。HOLDを選択してください。"
+    if metrics['entry_volatility'] >= 3.0:
+        vol_msg = "⚠️ 現在ボラティリティが極めて高い(3.0%以上)です。急落リスクがあるため、新規BUYは慎重に判断してください。"
 
+ # プロンプト (KERNEL Framework v3.0 - Macro & Pattern Aware)
     prompt = f"""
-あなたは「百発百中のスナイパー・トレーダー」です。
-「負けないこと」は当然として、**「確実に勝てる局面」だけ** を選び抜いてください。
+### CONTEXT (入力データ)
+対象銘柄: {name}
+1. マクロ環境 (地合い):
+   {macro if 'macro' in locals() else 'なし'}
+   ※ VIX指数や指数全体のトレンドに注目せよ。
 
-=== 入力情報 ===
-銘柄: {name}
+2. テクニカル指標:
+   - 週足トレンド: {weekly_trend if 'weekly_trend' in locals() else '不明'}
+   - 日足トレンド: {trend_dir} (勢い: {metrics['trend_momentum']:.2f})
+   - SMA25乖離率: {metrics['sma25_dev']:.2f}% (プラス＝SMAより上)
+   - ボラティリティ: {metrics['entry_volatility']:.2f}%
+   - BB幅(スクイーズ度): {metrics['bb_width']:.2f}%
+   - 出来高倍率: {metrics['volume_ratio']:.2f}倍
+   - RSI(9): {metrics['rsi_9']:.1f}
 
-0. マクロ・環境認識:
-   {macro}
-
-1. テクニカル分析:
-   - **週足(中期): {weekly_trend}**
-   - 日足(短期): {trend_dir} (勢い: {metrics['trend_momentum']:.2f})
-   - SMA25乖離: {metrics['sma25_dev']:.2f}% (プラスならSMAより上)
-   - ボラティリティ: {metrics['entry_volatility']:.2f}% (2.0%未満が理想)
-
-   **【重要指標】**
-   - **BB幅(スクイーズ度)**: {metrics['bb_width']:.2f}% (10%未満はエネルギー充填中)
-   - **出来高倍率**: {metrics['volume_ratio']:.2f}倍 (1.0超えは資金流入)
-   - **RSI(9)**: {metrics['rsi_9']:.1f} (40-60は押し目買いの好機)
-
-2. ファンダメンタルズ:
-   {fundamentals}
+3. ファンダメンタルズ:
+   {fundamentals if 'fundamentals' in locals() else 'なし'}
 
 {cbr_text}
 
-=== 判断基準 ===
+### TASK (タスク)
+あなたは百戦錬磨のファンドマネージャーです。
+提供されたデータに基づき、**「確率的優位性」**が最も高いアクション（BUY, HOLD, SELL）を選択してください。
 
-{vol_msg}
+### CONSTRAINTS & RULES (厳格な売買ルール)
 
-**【BUY 🔴: 新規買い（高勝率チャンス）】**
-以下をすべて満たす「黄金パターン」を念頭においてエントリーせよ。
-1. **安全性:** ボラティリティが 2.0% 未満であること。
-2. **トレンド:** SMA25が上向きで、価格がSMA25の上にあること。
-3. **エッジ (以下のいずれかがあること):**
-   - **スクイーズからの初動:** BB幅が狭く、かつ出来高が増加傾向にある。
-   - **押し目:** 上昇トレンド中で、RSIが 40〜50 まで調整している。
+**1. ボラティリティ判定 (リスク管理):**
+   - **< 2.0%**: [安全圏] 理想的なエントリー環境。
+   - **2.0% 〜 2.99%**: [警戒圏] 「強い上昇モメンタム」かつ「出来高倍率 > 1.0」の場合のみ、リスク許容のうえBUY可。
+   - **>= 3.0%**: [危険域] **新規BUYは絶対禁止**。保有ポジションは縮小・撤退を推奨。
 
-**【HOLD 🟡: 様子見・保有継続】**
-- トレンドは悪くないが、爆発の予兆（出来高急増など）がない場合。
-- 迷う場合はすべてHOLDを選択せよ。
+**2. BUY (新規買い) の条件 - 以下の [パターンA] か [パターンB] に合致する場合のみ:**
+   *前提: 価格がSMA25の上にあり、ボラティリティが3.0%未満であること。*
+   
+   - **[パターンA: ブレイクアウト] (攻め)**
+     - BB幅が狭い状態(<15%)から拡大傾向にある。
+     - **出来高倍率が 1.2倍以上** に急増している（資金流入）。
+     - RSIは 50〜70 の範囲（勢いがある）。
+     
+   - **[パターンB: 押し目買い] (守り)**
+     - 上昇トレンドが継続中（週足・日足ともに上向き）。
+     - 一時的な調整で、RSIが **40〜55** まで低下している。
+     - SMA25付近で下げ止まりの兆候がある。
 
-**【SELL 🔵: 決済・逃げ（手仕舞いの合図）】**
-- トレンド崩壊、またはボラティリティの急拡大。
-- ※空売りではなく「保有ポジションの決済（逃げ）」の合図として判断すること。
-- リスク回避を最優先し、負けないことを最重要視せよ。
+**3. SELL (利益確定・損切り) の条件:**
+   - **トレンド崩壊 (損切り):** 価格がSMA25を明確に下回った（終値ベース）。
+   - **クライマックス (利確):** 短期間で急騰し、RSIが **85以上** に達した、またはSMA25乖離率が **+10%以上** に開いた（過熱）。
+   - **パニック (撤退):** ボラティリティが **3.0%以上** に急拡大し、相場がコントロール不能になった。
 
-=== 出力 (JSONのみ) ===
+**4. HOLD (様子見) の条件:**
+   - 明確な「サイン」が出ていない中間領域。
+   - 地合い（マクロ）が暴落中で、個別銘柄の買いが危険な場合。
+   - 迷う場合は常にHOLD（ノーポジションは最強のポジション）。
+
+### SELF-CORRECTION (自己検証)
+- 出力する前に確認せよ: 「ボラティリティが高いのにBUYしていないか？」「トレンドが下向なのにBUYしていないか？」
+- ルール違反がある場合は、アクションを "HOLD" に修正すること。
+
+### FORMAT (出力形式: JSONのみ)
+Markdown、説明文は不要。以下のJSONのみを出力せよ。
 {{
-  "action": "BUY", "HOLD", "SELL" のいずれか,
-  "confidence": 0-100,
-  "stop_loss_price": 数値 (HOLDなら0),
-  "stop_loss_reason": "直近安値◯◯円割れ... (30文字以内)",
-  "reason": "ボラティリティ1.5%と低く、BB幅が収縮した状態で出来高が1.5倍に急増。爆発の初動と判断... (100文字以内)"
+  "action": "BUY" | "HOLD" | "SELL",
+  "confidence": <int 0-100>,
+  "stop_loss_price": <float> (HOLD/SELLの場合は0),
+  "stop_loss_reason": "理由(30文字以内)",
+  "reason": "判断根拠(パターンA/Bへの言及、テクニカル根拠など100文字以内)"
 }}
 """
     # ★追加: 安全設定（金融情報の誤ブロックを防ぐ）
@@ -388,6 +402,18 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
     except Exception as e:
         print(f"\n⚠️ AI ERROR: {e}") 
         return {"action": "HOLD", "confidence": 0, "reason": f"API Error: {e}", "stop_loss_price": 0}
+    
+def send_discord_notify(message):
+    if not webhook_url: return
+    try:
+        chunk_size = 1900
+        for i in range(0, len(message), chunk_size):
+            chunk = message[i:i+chunk_size]
+            requests.post(webhook_url, json={"content": chunk})
+            time.sleep(1)
+        print("✅ Discord通知送信")
+    except Exception as e:
+        print(f"⚠️ Discord送信エラー: {e}")
 
 # ==========================================
 # 5. メイン実行 (実戦監視)
