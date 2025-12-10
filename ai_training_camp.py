@@ -61,7 +61,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.0-flash' # コストパフォーマンスの良いモデル推奨
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
-TRAINING_ROUNDS = 2000 # 1回の実行で行う回数
+TRAINING_ROUNDS = 1500 # 1回の実行で行う回数
 TIMEFRAME = "1d" 
 CBR_NEIGHBORS_COUNT = 11
 MIN_VOLATILITY = 1.0 
