@@ -20,36 +20,50 @@ st.markdown("### 資産防衛型AI 自動売買・戦績分析ダッシュボー
 # ==========================================
 # 1. データ読み込み
 # ==========================================
-DATA_FILE = "real_trade_record.csv" # 実戦データのみ
+DATA_FILE = "ai_trade_memory_risk_managed.csv" # 実戦データのみ
 
-@st.cache_data
+# ---------------------------------------------------------
+# データの読み込み (修正版: エラー回避機能付き)
+# ---------------------------------------------------------
+@st.cache_data(ttl=60)
 def load_data():
     if not os.path.exists(DATA_FILE):
-        return None
+        return pd.DataFrame()
     
     try:
-        # エラー行をスキップして読み込む堅牢な設定
+        # ファイル読み込み
         df = pd.read_csv(DATA_FILE, on_bad_lines='skip')
         
-        # 日付変換
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-            df = df.sort_values('Date', ascending=False)
+        # 1. カラム名の空白削除（" Ticker " -> "Ticker"）
+        df.columns = [c.strip() for c in df.columns]
         
-        # 数値変換 (profit_loss)
-        if 'profit_loss' in df.columns:
-            df['profit_loss'] = pd.to_numeric(df['profit_loss'], errors='coerce').fillna(0)
-            
+        # 2. カラム名の正規化（小文字 -> 大文字変換）
+        # これにより "ticker" でも "Ticker" でも読み込めるようになります
+        rename_map = {
+            'ticker': 'Ticker', 'date': 'Date', 'timeframe': 'Timeframe',
+            'action': 'Action', 'result': 'result', 'price': 'Price',
+            'reason': 'Reason', 'confidence': 'Confidence'
+        }
+        new_cols = []
+        for col in df.columns:
+            new_cols.append(rename_map.get(col.lower(), col))
+        df.columns = new_cols
+        
         return df
     except Exception as e:
-        st.error(f"データ読み込みエラー: {e}")
-        return None
+        st.error(f"ファイル読み込みエラー: {e}")
+        return pd.DataFrame()
 
+# データをロード
 df_raw = load_data()
 
-if df_raw is None or len(df_raw) == 0:
-    st.warning("データファイルが見つかりません、またはデータが空です。システムを稼働させてデータを蓄積してください。")
-    st.stop()
+# ★追加: データが空、またはTicker列がない場合の安全装置
+if df_raw.empty or 'Ticker' not in df_raw.columns:
+    st.warning(f"⚠️ データファイル ({DATA_FILE}) がまだ空か、正しいフォーマットではありません。")
+    st.info("データが記録されるまでお待ちください。")
+    st.stop() # ここで処理を停止し、エラー画面を出さない
+
+# 以降の処理はそのまま...
 
 # ==========================================
 # 2. サイドバー (フィルタリング機能)
