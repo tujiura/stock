@@ -48,6 +48,7 @@ webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
 genai.configure(api_key=GOOGLE_API_KEY)
 
 LOG_FILE = "ai_trade_memory_risk_managed.csv"
+REAL_TRADE_LOG_FILE = "real_trade_record.csv"
 MODEL_NAME = 'models/gemini-3-pro-preview' # モデル名は適宜変更してください
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 11
@@ -627,6 +628,17 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ 書き込みエラー: {e}")
 
+        try:
+            if not os.path.exists(REAL_TRADE_LOG_FILE):
+                df_new.to_csv(REAL_TRADE_LOG_FILE, index=False, encoding='utf-8-sig')
+            else:
+                df_new.to_csv(REAL_TRADE_LOG_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
+            print(f"🗂️ 実戦ログ保存: {tic}")
+        except PermissionError:
+            print(f"❌【実戦用】CSVが開かれています。閉じてください。")
+        except Exception as e:
+            print(f"❌【実戦用】保存エラー: {e}")
+            
         if not os.path.exists(LOG_FILE):
             df_new.to_csv(LOG_FILE, index=False, encoding='utf-8-sig')
         else:

@@ -20,7 +20,7 @@ st.markdown("### 資産防衛型AI 自動売買・戦績分析ダッシュボー
 # ==========================================
 # 1. データ読み込み
 # ==========================================
-DATA_FILE = "ai_trade_memory_risk_managed.csv"
+DATA_FILE = "real_trade_record.csv" # 実戦データのみ
 
 @st.cache_data
 def load_data():

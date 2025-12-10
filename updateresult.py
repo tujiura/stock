@@ -3,142 +3,214 @@ import yfinance as yf
 import datetime
 import os
 import time
+import sys
 
-# 設定
-LOG_FILE = "ai_trade_memory_risk_managed.csv"
-HOLD_PERIOD = 5  # 何日後に決済するか（5営業日）
+# ---------------------------------------------------------
+# ★設定エリア
+# ---------------------------------------------------------
+# 更新対象のファイルリスト
+TARGET_FILES = [
+    "ai_trade_memory_risk_managed.csv", # 学習用（AIの脳）
+    "real_trade_record.csv"             # 実戦用（あなたの記録）
+]
 
-def update_past_results():
-    print("=== 過去のトレード答え合わせ（成績更新ツール） ===")
-    
-    if not os.path.exists(LOG_FILE):
-        print(f"エラー: {LOG_FILE} が見つかりません。")
+# 判定設定
+PROFIT_TARGET_PCT = 0.05  # 5%利益で早期利確（WIN）
+JUDGE_PERIOD_DAYS = 15     # ★変更: 判定期間（これを超えたら強制決済）
+
+# CSVの列順序定義（破損防止用）
+CSV_COLUMNS = [
+    "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
+    "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
+    "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", "profit_loss"
+]
+
+# ---------------------------------------------------------
+# 関数定義
+# ---------------------------------------------------------
+def get_stock_data(ticker, start_date):
+    """
+    指定日以降の株価データを取得
+    """
+    try:
+        # 開始日から今日までのデータを取得
+        df = yf.download(ticker, start=start_date, progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        if df.empty: return None
+        return df
+    except Exception as e:
+        print(f"   ⚠️ データ取得エラー {ticker}: {e}")
+        return None
+
+def update_single_file(file_path):
+    """
+    1つのCSVファイルを読み込み、結果を更新して保存する
+    """
+    if not os.path.exists(file_path):
+        print(f"⏩ ファイルなし（スキップ）: {file_path}")
         return
 
+    print(f"\n📂 ファイル読み込み中: {file_path}")
+    
     try:
-        # CSV読み込み
-        df = pd.read_csv(LOG_FILE)
-        
-        # カラム名の正規化（小文字に統一してから、扱いやすい名前に戻す）
-        # これにより、新旧どちらのフォーマットでも動くようにする
-        rename_map = {
-            'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 
-            'price': 'Price', 'result': 'result', 'profit_loss': 'profit_loss',
-            'stop_loss_price': 'stop_loss_price'
-        }
+        df = pd.read_csv(file_path, on_bad_lines='skip')
+        rename_map = {'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 'result': 'result', 'price': 'Price', 'stop_loss_price': 'stop_loss_price'}
         df.columns = [rename_map.get(col.lower(), col) for col in df.columns]
-        
-        # 更新対象: Resultが空欄、かつActionがBUYの行
-        # ※現在のロジックでは「BUY」のみが新規エントリーのため
-        target_rows = df[
-            (df['result'].isna() | (df['result'] == '') | (df['result'] == 'nan')) & 
-            (df['Action'] == 'BUY')
-        ]
-        
-        if len(target_rows) == 0:
-            print("✅ 更新が必要な未確定データはありません。")
-            return
-
-        print(f"未確定データ: {len(target_rows)}件")
-        
-        updated_count = 0
-        
-        for index, row in target_rows.iterrows():
-            ticker = row['Ticker']
-            entry_date_str = str(row['Date'])
-            entry_price = float(row['Price'])
-            
-            # 損切り価格（あれば取得）
-            try: sl_price = float(row['stop_loss_price'])
-            except: sl_price = 0.0
-
-            # 日付解析 (YYYY-MM-DD)
-            try:
-                entry_date = pd.to_datetime(entry_date_str).date()
-            except:
-                print(f"スキップ: 日付形式エラー ({entry_date_str})")
-                continue
-
-            # 経過日数が足りているか確認
-            days_passed = (datetime.date.today() - entry_date).days
-            # 土日含め7日（約5営業日）経過していないと判定できない
-            if days_passed < 7:
-                continue
-
-            print(f"チェック中: {entry_date} {ticker} ...", end="")
-
-            # 株価データ取得（エントリー日から今日まで）
-            try:
-                # yfinanceでデータ取得
-                # startはエントリー日、endは今日
-                hist = yf.download(ticker, start=entry_date, progress=False, auto_adjust=True)
-                
-                if isinstance(hist.columns, pd.MultiIndex):
-                    hist.columns = hist.columns.droplevel(1)
-                
-                # データが少なすぎる場合はスキップ
-                if len(hist) < 2:
-                    print(" データ不足")
-                    continue
-                
-                # 判定期間のデータを抽出（エントリー翌日〜5営業日後まで）
-                # ※ iloc[0]はエントリー当日なので除外
-                period_data = hist.iloc[1:HOLD_PERIOD+1]
-                
-                if period_data.empty:
-                    print(" 期間データなし")
-                    continue
-
-                # 期間中の最安値・最高値・最終価格
-                low_price = period_data['Low'].min()
-                high_price = period_data['High'].max()
-                exit_price = float(period_data.iloc[-1]['Close'])
-                
-                result = "DRAW"
-                final_price = exit_price
-                
-                # --- 勝敗判定ロジック ---
-                # 1. 損切りにかかったか？ (SL設定がある場合)
-                if sl_price > 0 and low_price <= sl_price:
-                    result = "LOSS"
-                    final_price = sl_price # 損切り価格で決済とみなす
-                
-                # 2. 利確か？ (2%以上上昇)
-                elif exit_price > entry_price * 1.02:
-                    result = "WIN"
-                
-                # 3. 負けか？ (2%以上下落)
-                elif exit_price < entry_price * 0.98:
-                    result = "LOSS"
-                
-                # 4. それ以外は引き分け (DRAW)
-                else:
-                    result = "DRAW"
-                        
-                profit = final_price - entry_price
-
-                # データフレーム更新
-                df.at[index, 'result'] = result
-                df.at[index, 'profit_loss'] = profit
-                
-                print(f" -> {result} (損益: {profit:.0f})")
-                updated_count += 1
-                
-                time.sleep(1) # API制限考慮
-
-            except Exception as e:
-                print(f" エラー: {e}")
-                continue
-
-        # 保存
-        if updated_count > 0:
-            df.to_csv(LOG_FILE, index=False, encoding='utf-8-sig')
-            print(f"\n✅ {updated_count}件の成績を更新し、AIの記憶を強化しました！")
-        else:
-            print("\n今回は更新可能なデータ（期間経過済み）はありませんでした。")
-
+        for col in CSV_COLUMNS:
+            if col not in df.columns: df[col] = None
     except Exception as e:
-        print(f"全体エラー: {e}")
+        print(f"❌ 読み込みエラー: {e}")
+        return
 
+    updated_count = 0
+    now = datetime.datetime.now()
+    
+    # 行ごとの処理
+    for index, row in df.iterrows():
+        # 既に結果が出ている、またはHOLDの場合はスキップ
+        if pd.notna(row['result']) and str(row['result']).strip() != "":
+            continue
+        if row['Action'] == 'HOLD':
+            continue
+            
+        ticker = row['Ticker']
+        entry_date_str = row['Date']
+        action = row['Action']
+        entry_price = float(row['Price']) if pd.notna(row['Price']) else 0
+        sl_price = float(row['stop_loss_price']) if pd.notna(row['stop_loss_price']) else 0
+        
+        if entry_price == 0: continue
+
+        try:
+            entry_date = pd.to_datetime(entry_date_str)
+            stock_data = get_stock_data(ticker, entry_date_str)
+        except:
+            continue
+
+        if stock_data is None or len(stock_data) < 2: continue
+
+        # --- 判定ロジック (1週間限定) ---
+        
+        # 1. 判定期限日を計算（エントリー日 + 7日）
+        limit_date = entry_date + datetime.timedelta(days=JUDGE_PERIOD_DAYS)
+        
+        # 2. エントリー翌日から期限日までのデータを抽出
+        period_data = stock_data[(stock_data.index >= entry_date) & (stock_data.index <= limit_date)]
+        
+        if len(period_data) == 0: continue
+
+        # 期間内の高値・安値
+        period_low = float(period_data['Low'].min())
+        period_high = float(period_data['High'].max())
+        
+        # 期間最終日の終値（タイムアップ時の決済価格）
+        final_close = float(period_data.iloc[-1]['Close'])
+        final_date = period_data.index[-1]
+        
+        result = ""
+        profit_loss = 0.0
+        is_settled = False # 期間内にSL/TPで決着がついたか
+
+        # A. 期間内のSL/TPチェック（優先）
+        if action == "BUY":
+            # 損切り (SL)
+            if sl_price > 0 and period_low <= sl_price:
+                result = "LOSS"
+                profit_loss = sl_price - entry_price
+                print(f"   💀 {ticker}: 期間内損切り (安値 {period_low:.0f} <= SL {sl_price:.0f})")
+                is_settled = True
+            # 利確 (TP)
+            elif period_high >= entry_price * (1 + PROFIT_TARGET_PCT):
+                result = "WIN"
+                profit_loss = (entry_price * (1 + PROFIT_TARGET_PCT)) - entry_price
+                print(f"   🏆 {ticker}: 期間内利確 (目標到達)")
+                is_settled = True
+
+        elif action == "SELL":
+            # 損切り (SL: 空売りなので高値で損切り)
+            if sl_price > 0 and period_high >= sl_price:
+                result = "LOSS"
+                profit_loss = entry_price - sl_price
+                print(f"   💀 {ticker}: 期間内損切り (高値 {period_high:.0f} >= SL {sl_price:.0f})")
+                is_settled = True
+            # 利確 (TP: 空売りなので安値で利確)
+            elif period_low <= entry_price * (1 - PROFIT_TARGET_PCT):
+                result = "WIN"
+                profit_loss = entry_price - (entry_price * (1 - PROFIT_TARGET_PCT))
+                print(f"   🏆 {ticker}: 期間内利確 (目標到達)")
+                is_settled = True
+
+        # B. 期間終了による強制判定 (Time Stop)
+        # まだ決着がついておらず、かつ「現在日時が期限を過ぎている」場合
+        if not is_settled:
+            if now > limit_date:
+                # 最終日の終値で決済したとみなす
+                if action == "BUY":
+                    profit_loss = final_close - entry_price
+                elif action == "SELL":
+                    profit_loss = entry_price - final_close
+                
+                if profit_loss > 0:
+                    result = "WIN"
+                    print(f"   ⏰ {ticker}: 期限切れ WIN (終値 {final_close:.0f})")
+                else:
+                    result = "LOSS"
+                    print(f"   ⏰ {ticker}: 期限切れ LOSS (終値 {final_close:.0f})")
+            else:
+                # まだ期間内で、かつSL/TPにもかかっていない -> 結果保留
+                pass
+
+        # 結果が出た場合のみ更新
+        if result != "":
+            df.at[index, 'result'] = result
+            df.at[index, 'profit_loss'] = profit_loss
+            updated_count += 1
+
+    # 保存処理
+    if updated_count > 0:
+        print(f"   💾 {updated_count} 件のデータを更新して保存します...")
+        df = df[CSV_COLUMNS]
+        for i in range(5):
+            try:
+                df.to_csv(file_path, index=False, encoding='utf-8-sig')
+                print("   ✅ 保存成功")
+                
+                try:
+                    import subprocess
+                    subprocess.run(["git", "add", file_path], check=True, capture_output=True)
+                    subprocess.run(["git", "commit", "-m", f"Auto update results (1week rule): {file_path}"], check=True, capture_output=True)
+                    print("   ☁️ Gitコミット完了")
+                except: pass
+                break
+            except PermissionError:
+                print(f"   ⚠️ ファイルが開かれています。閉じてください ({i+1}/5)")
+                time.sleep(3)
+            except Exception as e:
+                print(f"   ❌ 保存エラー: {e}")
+                break
+    else:
+        print("   (更新対象なし)")
+
+# ---------------------------------------------------------
+# メイン実行
+# ---------------------------------------------------------
 if __name__ == "__main__":
-    update_past_results()
+    print("=== 📈 トレード結果 自動更新システム (1週間判定版) ===")
+    
+    do_push = False
+    for file_name in TARGET_FILES:
+        update_single_file(file_name)
+        do_push = True
+
+    if do_push:
+        try:
+            import subprocess
+            print("\n☁️ GitHubへ同期中...")
+            subprocess.run(["git", "push"], check=True)
+            print("✅ 同期完了")
+        except:
+            print("⚠️ Git Pushスキップ")
+            
+    print("\nすべての処理が完了しました。")
+    time.sleep(3)

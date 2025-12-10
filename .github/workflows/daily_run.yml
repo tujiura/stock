@@ -2,9 +2,13 @@ name: Daily AI Trade
 
 on:
   schedule:
-    # 日本時間 8:00 (UTC 23:00) に実行
-    # ※ cron形式: 分 時 日 月 曜日 (UTC)
-    - cron: '0 23 * * 1-5'
+    # 1. 日本時間 朝 8:00 (UTC 23:00) 月～金
+    #    ※UTCでは日付が変わる前なので「日～木(0-4)」指定
+    - cron: '30 22 * * 0-4'
+    
+    # 2. 日本時間 昼 11:30 (UTC 02:30) 月～金
+    - cron: '30 2 * * 1-5'
+    
   workflow_dispatch: # 手動実行ボタンも有効化
 
 permissions:
@@ -30,7 +34,6 @@ jobs:
       - name: Run AI Trading Bot
         env:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python ai_market_monitor_cbr.py
@@ -43,7 +46,7 @@ jobs:
           # CSVを追加
           git add ai_trade_memory_risk_managed.csv
           
-          # ★追加: レポート用フォルダとファイルを追加
+          # レポート用フォルダとファイルを追加
           git add reports/latest_report.txt
           
           # 変更があれば保存
