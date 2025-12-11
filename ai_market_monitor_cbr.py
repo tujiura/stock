@@ -50,7 +50,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 LOG_FILE = "ai_trade_memory_risk_managed.csv" # 学習用メモリ（AIの脳）
 REAL_TRADE_LOG_FILE = "real_trade_record.csv" # 実戦用ログ（あなたの記録）
 
-MODEL_NAME = 'models/gemini-2.5-pro' # 最新モデル推奨 (または gemini-2.0-pro-exp)
+MODEL_NAME = 'models/gemini-3-pro-preview' # 最新モデル推奨 (または gemini-2.0-pro-exp)
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 11
 
