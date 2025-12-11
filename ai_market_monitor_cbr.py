@@ -621,7 +621,7 @@ if __name__ == "__main__":
             msg = f"🔵 **SELL (決済) {name}**: {metrics['price']:.0f}円\n> 理由: {res.get('reason')}"
             buy_list.append(msg)
             
-        time.sleep(2)
+        time.sleep(5)
 
     if buy_list:
         report_message += "\n\n🚀 **新規BUY/SELL推奨**\n" + "\n\n".join(buy_list)
