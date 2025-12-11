@@ -2,14 +2,13 @@ name: Daily AI Trade
 
 on:
   schedule:
-    # 1. 朝 8:00 JST (UTC 23:00) : 偵察用
-    - cron: '30 22 * * 0-4'
-    
-    # 2. 昼 11:30 JST (UTC 02:30) : 監視用
-    - cron: '35 2 * * 1-5'
+    # 1. 昼 11:30 JST (UTC 02:30) : 前場の監視 & 後場の仕込み用
+    - cron: '30 2 * * 1-5'
 
-    # 3. 夕方 15:30 JST (UTC 06:30) : ★本番記録用 (ここを追加！)
-    - cron: '35 6 * * 1-5'
+    # 2. 夕 15:30 JST (UTC 06:30) : ★本番記録 & 翌日の仕込み用
+    - cron: '30 6 * * 1-5'
+    
+  workflow_dispatch: # 手動実行ボタン
     
   workflow_dispatch: # 手動実行ボタンも有効化
 
