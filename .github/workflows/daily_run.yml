@@ -44,14 +44,19 @@ jobs:
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
           
-          # 1. まず最新のリモート情報を取得してマージする
-          git pull --rebase
-          
-          # 2. その後にファイルを追加
+          # 1. 先に変更をステージング(add)してコミットする
+          # (これで変更が保存され、pullしてもエラーにならなくなります)
           git add ai_trade_memory_risk_managed.csv
           git add reports/latest_report.txt
-          git add real_trade_record.csv # 実戦ログも忘れず追加
+          # ファイルが存在する場合のみ add する (エラー回避)
+          if [ -f real_trade_record.csv ]; then git add real_trade_record.csv; fi
           
-          # 3. コミットしてプッシュ
+          # 変更がない場合はコミットをスキップ
           git commit -m "Update trade data & report [skip ci]" || echo "No changes to commit"
+          
+          # 2. その後に最新を取り込んでリベースする (順序変更)
+          # (自分のコミットを、最新のリモート履歴の上に積み直す処理)
+          git pull --rebase
+          
+          # 3. プッシュ
           git push
