@@ -40,17 +40,19 @@ jobs:
         run: |
           python ai_market_monitor_cbr.py
 
-      - name: Commit and Push updates
+      - name: Save & Push Data
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
           
-          # CSVを追加
+          # 1. まず最新のリモート情報を取得してマージする
+          git pull --rebase
+          
+          # 2. その後にファイルを追加
           git add ai_trade_memory_risk_managed.csv
-          
-          # レポート用フォルダとファイルを追加
           git add reports/latest_report.txt
+          git add real_trade_record.csv # 実戦ログも忘れず追加
           
-          # 変更があれば保存
+          # 3. コミットしてプッシュ
           git commit -m "Update trade data & report [skip ci]" || echo "No changes to commit"
           git push
