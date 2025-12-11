@@ -9,8 +9,6 @@ on:
     - cron: '30 6 * * 1-5'
     
   workflow_dispatch: # 手動実行ボタン
-    
-  workflow_dispatch: # 手動実行ボタンも有効化
 
 permissions:
   contents: write
