@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import datetime
 
 # ==========================================
 # ★設定: ページ構成
@@ -41,7 +42,8 @@ def load_data():
         rename_map = {
             'ticker': 'Ticker', 'date': 'Date', 'timeframe': 'Timeframe',
             'action': 'Action', 'result': 'result', 'price': 'Price',
-            'reason': 'Reason', 'confidence': 'Confidence'
+            'reason': 'Reason', 'confidence': 'Confidence',
+            'profit_loss': 'profit_loss', 'entry_volatility': 'entry_volatility'
         }
         new_cols = []
         for col in df.columns:
@@ -54,10 +56,15 @@ def load_data():
             # 変換に失敗した行（NaT）があれば削除しておくのが安全
             df = df.dropna(subset=['Date'])
 
+        # 数値変換 (profit_lossなど)
+        if 'profit_loss' in df.columns:
+            df['profit_loss'] = pd.to_numeric(df['profit_loss'], errors='coerce').fillna(0)
+
         return df
     except Exception as e:
         st.error(f"ファイル読み込みエラー: {e}")
         return pd.DataFrame()
+
 # データをロード
 df_raw = load_data()
 
@@ -66,8 +73,6 @@ if df_raw.empty or 'Ticker' not in df_raw.columns:
     st.warning(f"⚠️ データファイル ({DATA_FILE}) がまだ空か、正しいフォーマットではありません。")
     st.info("データが記録されるまでお待ちください。")
     st.stop() # ここで処理を停止し、エラー画面を出さない
-
-# 以降の処理はそのまま...
 
 # ==========================================
 # 2. サイドバー (フィルタリング機能)
@@ -87,19 +92,24 @@ selected_ticker = st.sidebar.selectbox("銘柄を選択", tickers)
 if 'Date' in df_raw.columns:
     min_date = df_raw['Date'].min()
     max_date = df_raw['Date'].max()
+    
     # 日付が取得できない場合の安全策
     if pd.isna(min_date):
-        import datetime
         min_date = datetime.date.today()
         max_date = datetime.date.today()
+    else:
+        # datetime型からdate型へ変換
+        min_date = min_date.date()
+        max_date = max_date.date()
     
     start_date, end_date = st.sidebar.date_input(
         "期間を選択",
         [min_date, max_date]
     )
 
-# データの絞り込み
+# --- データの絞り込み ---
 df = df_raw.copy()
+
 if selected_ticker != "ALL":
     df = df[df['Ticker'] == selected_ticker]
 
@@ -107,7 +117,36 @@ if selected_ticker != "ALL":
 if 'Date' in df.columns:
     df = df[(df['Date'].dt.date >= start_date) & (df['Date'].dt.date <= end_date)]
 
-# 戦績データのみ抽出 (WIN/LOSSがついているもの)
+# --- 詳細フィルター (Action & Result) ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("詳細フィルター")
+
+# Actionフィルター
+all_actions = list(df_raw['Action'].unique())
+selected_actions = st.sidebar.multiselect("Action (売買)", all_actions, default=all_actions)
+
+# Resultフィルター
+all_results = list(df_raw['result'].fillna('Unset').unique())
+selected_results = st.sidebar.multiselect("Result (勝敗)", all_results, default=all_results)
+
+# フィルター適用
+if selected_actions:
+    df = df[df['Action'].isin(selected_actions)]
+if selected_results:
+    # NaN(未決済)の扱いを含めるため fillna してから比較
+    df = df[df['result'].fillna('Unset').isin(selected_results)]
+
+# --- ソート機能 ---
+sort_by = st.sidebar.selectbox("並び替え基準", options=['Date', 'profit_loss', 'entry_volatility'], index=0)
+sort_order = st.sidebar.radio("順序", options=['Desc (降順)', 'Asc (昇順)'], index=0)
+
+if sort_order == 'Desc (降順)':
+    df = df.sort_values(by=sort_by, ascending=False)
+else:
+    df = df.sort_values(by=sort_by, ascending=True)
+
+
+# 戦績データのみ抽出 (WIN/LOSSがついているもの) for KPI
 df_results = df[df['result'].isin(['WIN', 'LOSS', 'DRAW'])]
 
 # ==========================================
@@ -126,7 +165,7 @@ total_profit = df_results['profit_loss'].sum()
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.metric("総トレード数", f"{total_trades} 回", delta=f"勝: {wins} / 負: {losses}")
+    st.metric("抽出トレード数", f"{total_trades} 回", delta=f"勝: {wins} / 負: {losses}")
 
 with col2:
     st.metric("勝率 (Win Rate)", f"{win_rate:.1f} %", 
@@ -138,9 +177,14 @@ with col3:
 
 with col4:
     # 直近のアクション
-    last_action = df.iloc[0]['Action'] if len(df) > 0 else "-"
-    last_ticker = df.iloc[0]['Ticker'] if len(df) > 0 else "-"
-    st.metric("最新シグナル", f"{last_action}", f"{last_ticker}")
+    if len(df) > 0:
+        last_action = df.iloc[0]['Action']
+        last_ticker = df.iloc[0]['Ticker']
+        last_date = df.iloc[0]['Date'].strftime('%Y-%m-%d')
+    else:
+        last_action, last_ticker, last_date = "-", "-", "-"
+        
+    st.metric("最新データ", f"{last_date}", f"{last_action} {last_ticker}")
 
 # ==========================================
 # 4. グラフ分析エリア
@@ -150,7 +194,7 @@ col_left, col_right = st.columns([2, 1])
 with col_left:
     st.subheader("📈 資産推移 (累積損益)")
     if len(df_results) > 0:
-        # 日付順に並べ替え
+        # 日付順に並べ替え (グラフ用)
         df_chart = df_results.sort_values('Date', ascending=True).copy()
         df_chart['Cumulative PL'] = df_chart['profit_loss'].cumsum()
         
@@ -159,7 +203,7 @@ with col_left:
         fig_equity.add_hline(y=0, line_dash="dash", line_color="gray")
         st.plotly_chart(fig_equity, use_container_width=True)
     else:
-        st.info("戦績データがまだありません。")
+        st.info("戦績データがありません。")
 
 with col_right:
     st.subheader("📊 勝敗比率")
@@ -180,6 +224,7 @@ if len(df_results) > 0:
     ticker_perf = df_results.groupby('Ticker')['profit_loss'].sum().reset_index()
     ticker_perf = ticker_perf.sort_values('profit_loss', ascending=False)
     
+    # 上位・下位を見やすくするために色分け
     fig_bar = px.bar(ticker_perf, x='Ticker', y='profit_loss',
                      color='profit_loss',
                      color_continuous_scale=['red', 'gray', 'green'],
@@ -189,9 +234,9 @@ if len(df_results) > 0:
 # ==========================================
 # 6. 生データ (フィルタリング結果)
 # ==========================================
-st.subheader("📝 取引履歴 (Raw Data)")
+st.subheader(f"📝 取引履歴 (全{len(df)}件)")
 st.dataframe(df, use_container_width=True)
 
 # フッター
 st.markdown("---")
-st.caption("AI Market Monitor System - Sniper Edition v2.0")
+st.caption("AI Market Monitor System - Sniper Edition v2.1")
