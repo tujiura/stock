@@ -380,8 +380,6 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
   "reason": "理由(100文字以内)"
 }}
 """
-
-"""
     # ★追加: 安全設定（金融情報の誤ブロックを防ぐ）
     safety_settings = {
         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
