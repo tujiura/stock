@@ -59,28 +59,7 @@ CBR_NEIGHBORS_COUNT = 11
 # 監視リスト (スナイパー仕様・厳選80銘柄)
 WATCH_LIST = [
     # --- 🏆 エース級 (高収益・相性良) ---
-    "6146.T", "8035.T", "9983.T", "7741.T", "6857.T", "7012.T", "6367.T", "7832.T",
-    "1801.T", "9766.T", "2801.T", "4063.T", "4543.T", "4911.T", "4507.T",
-
-    # --- 🛡️ 安定・ディフェンシブ (低ボラ・堅実) ---
-    "9432.T", "9433.T", "9434.T", "4503.T", "4502.T", "2502.T", "2503.T", "2802.T",
-    "4901.T", "1925.T", "1928.T", "1802.T", "1803.T", "1812.T", "9020.T", "9021.T",
-    "9022.T", "9531.T", "9532.T", "9735.T", "9613.T",
-
-    # --- 💰 金融・銀行 (金利メリット・トレンド良) ---
-    "8306.T", "8316.T", "8411.T", "8308.T", "8309.T", "8331.T", "8354.T", "8766.T",
-    "8725.T", "8591.T", "8593.T", "8604.T", "8601.T", "8473.T", "8630.T", "8697.T",
-
-    # --- 🏢 商社・卸売 (割安・高配当) ---
-    "8058.T", "8031.T", "8001.T", "8002.T", "8015.T", "2768.T", "8053.T", "7459.T",
-    "8088.T", "9962.T", "3092.T", "3382.T",
-
-    # --- 🏭 重厚長大・自動車 (円安恩恵) ---
-    "7011.T", "7013.T", "6301.T", "7203.T", "7267.T", "7269.T", "7270.T", "7201.T",
-    "7202.T", "5401.T", "5411.T", "5406.T", "5713.T", "1605.T", "5020.T",
-
-    # --- 📦 その他・機械 (選抜) ---
-    "6501.T", "6503.T", "6305.T", "6326.T", "6383.T", "6471.T", "6472.T", "6473.T",
+    "4502.T"
 ]
 
 plt.rcParams['font.family'] = 'sans-serif'
@@ -180,6 +159,27 @@ def get_latest_news(ticker):
         if not feed.entries: return "特になし"
         return "\n".join([f"・{e.title}" for e in feed.entries[:2]])
     except: return "取得エラー"
+
+def get_earnings_date(ticker):
+    """決算発表日を取得する（取得できない場合は'-'）"""
+    try:
+        stock = yf.Ticker(ticker)
+        # 次回の決算日を取得
+        calendar = stock.calendar
+        if calendar and 'Earnings Date' in calendar:
+            # 複数の日付候補がある場合は最初の日付を取得
+            earnings_date = calendar['Earnings Date'][0]
+            return earnings_date.strftime('%Y-%m-%d')
+        # 代替手段: earnings_datesプロパティ
+        dates = stock.earnings_dates
+        if dates is not None and not dates.empty:
+            # 未来の日付を探す
+            future_dates = dates[dates.index > datetime.datetime.now()]
+            if not future_dates.empty:
+                return future_dates.index[-1].strftime('%Y-%m-%d')
+    except:
+        pass
+    return "-"
 
 def calculate_metrics_enhanced(df):
     if len(df) < 25: return None 
@@ -370,15 +370,17 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
 - 出力する前に確認せよ: 「ボラティリティが高いのにBUYしていないか？」「トレンドが下向なのにBUYしていないか？」
 - ルール違反がある場合は、アクションを "HOLD" に修正すること。
 
-### FORMAT (出力形式: JSONのみ)
-Markdown、説明文は不要。以下のJSONのみを出力せよ。
+=== 出力 (JSONのみ) ===
 {{
-  "action": "BUY" | "HOLD" | "SELL",
-  "confidence": <int 0-100>,
-  "stop_loss_price": <float> (HOLD/SELLの場合は0),
+  "action": "BUY", "HOLD", "SELL" のいずれか,
+  "confidence": 0-100,
+  "stop_loss_price": 数値 (HOLDなら0),
   "stop_loss_reason": "理由(30文字以内)",
-  "reason": "判断根拠(パターンA/Bへの言及、テクニカル根拠など100文字以内)"
+  "target_price": 数値 (BUYの場合の利確目標。HOLD/SELLなら0),  # ★追加
+  "reason": "理由(100文字以内)"
 }}
+"""
+
 """
     # ★追加: 安全設定（金融情報の誤ブロックを防ぐ）
     safety_settings = {
@@ -415,21 +417,43 @@ Markdown、説明文は不要。以下のJSONのみを出力せよ。
     
 def send_discord_notify(message):
     if not webhook_url: return
+    
+    # 送信用のファイル名 (日付入り)
+    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+    filename = f"AI_Report_{today_str}.txt"
+    
     try:
-        chunk_size = 1900
-        for i in range(0, len(message), chunk_size):
-            chunk = message[i:i+chunk_size]
-            requests.post(webhook_url, json={"content": chunk})
-            time.sleep(1)
-        print("✅ Discord通知送信")
+        # メッセージをメモリ上のファイルとして作成
+        # encoding='utf-8' で日本語対応
+        files = {
+            "file": (filename, message.encode('utf-8'))
+        }
+        
+        # 本文には短いメッセージだけ載せる
+        payload = {
+            "content": f"📊 **本日のAI市場監視レポート ({today_str})**\n詳細は添付ファイルを確認してください。"
+        }
+        
+        # マルチパート形式で送信
+        response = requests.post(webhook_url, data=payload, files=files)
+        
+        if response.status_code in [200, 204]:
+            print("✅ Discord通知送信 (ファイル添付)")
+        else:
+            print(f"⚠️ Discord送信失敗: {response.status_code} - {response.text}")
+            
     except Exception as e:
         print(f"⚠️ Discord送信エラー: {e}")
+
 
 # ==========================================
 # 5. メイン実行 (実戦監視)
 # ==========================================
 # ==========================================
 # 5. メイン実行 (実戦監視)
+# ==========================================
+# ==========================================
+# 5. メイン実行 (実戦監視・全株価記録版)
 # ==========================================
 if __name__ == "__main__":
     today = datetime.datetime.now().strftime('%Y-%m-%d')
@@ -450,14 +474,16 @@ if __name__ == "__main__":
     report_message = f"**📊 AI市場監視レポート ({today})**\n\n{macro}\n"
     buy_list = []
     
+    # ★追加: 全銘柄の株価保存用リスト
+    all_stock_prices = []
+    
     # 保存先ファイルの定義
     SAVE_TARGETS = [
         {"path": LOG_FILE, "name": "学習メモリ"},
         {"path": REAL_TRADE_LOG_FILE, "name": "実戦ログ"}
     ]
 
-    # ★追加: 時間判定ロジック
-    # GitHub Actions(UTC)でもローカル(JST)でも動作するように調整
+    # 時間判定ロジック
     now_utc = datetime.datetime.utcnow()
     now_jst = now_utc + datetime.timedelta(hours=9)
     current_hour_jst = now_jst.hour
@@ -483,7 +509,6 @@ if __name__ == "__main__":
         df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
         df['Signal'] = df['MACD'].ewm(span=9).mean()
         
-        # ATR計算など（省略なしでそのまま使います）
         high_low = df['High'] - df['Low']
         high_close = np.abs(df['High'] - df['Close'].shift())
         low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -492,9 +517,70 @@ if __name__ == "__main__":
         
         df = df.dropna()
         metrics = calculate_metrics_enhanced(df)
+                # ... (前略)
+        metrics = calculate_metrics_enhanced(df)
         if metrics is None: 
             print("Skip")
             continue
+        
+        # ★追加: 決算日の取得
+        earnings_date = get_earnings_date(tic)
+        
+        # 株価情報の記録 (決算日を追加)
+        current_price = metrics['price']
+        try:
+            prev_close = df.iloc[-2]['Close']
+            change = current_price - prev_close
+            change_pct = (change / prev_close) * 100
+            # 決算日が近い（2週間以内）なら警告マークをつける
+            earnings_mark = ""
+            if earnings_date != "-":
+                e_date = datetime.datetime.strptime(earnings_date, '%Y-%m-%d')
+                days_to_earnings = (e_date - datetime.datetime.now()).days
+                if 0 <= days_to_earnings <= 14:
+                    earnings_mark = f" ⚠️決算:{earnings_date}"
+                else:
+                    earnings_mark = f" (決算:{earnings_date})"
+            
+            price_str = f"• {name:<8}: {current_price:7,.0f}円 ({change:+5,.0f} / {change_pct:+5.2f}%){earnings_mark}"
+        except:
+            price_str = f"• {name:<8}: {current_price:7,.0f}円"
+        
+        all_stock_prices.append(price_str)
+        
+        # ... (中略: AI分析など) ...
+        
+        # AI分析実行
+        res = analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, fundamentals, weekly_trend, name)
+              
+        action = res.get('action', 'HOLD')
+        conf = res.get('confidence', 0)
+        sl_price_raw = res.get('stop_loss_price', 0)
+        tp_price_raw = res.get('target_price', 0) # ★追加: TP取得
+        
+        try: sl_price = float(sl_price_raw)
+        except: sl_price = 0.0
+        try: tp_price = float(tp_price_raw) # ★追加
+        except: tp_price = 0.0
+
+        
+        if metrics is None: 
+            print("Skip")
+            continue
+        
+        # --- ★追加: 株価情報の記録 ---
+        current_price = metrics['price']
+        try:
+            # 前日比の計算
+            prev_close = df.iloc[-2]['Close']
+            change = current_price - prev_close
+            change_pct = (change / prev_close) * 100
+            price_str = f"• {name:<8}: {current_price:7,.0f}円 ({change:+5,.0f} / {change_pct:+5.2f}%)"
+        except:
+            price_str = f"• {name:<8}: {current_price:7,.0f}円"
+        
+        all_stock_prices.append(price_str)
+        # -----------------------------
         
         cbr_text = cbr.search_similar_cases(metrics)
         chart = create_chart_image(df, name)
@@ -538,33 +624,26 @@ if __name__ == "__main__":
             if col not in df_new.columns: df_new[col] = None
         df_new = df_new[csv_columns]
 
-        # --- ★条件付き保存処理 (時間制限 + 重複チェック) ---
+        # --- 条件付き保存処理 ---
         if is_closing_time:
             for target in SAVE_TARGETS:
                 path = target["path"]
-                name_label = target["name"]
-                
                 try:
                     if os.path.exists(path):
                         try:
                             df_exist = pd.read_csv(path, on_bad_lines='skip')
                             is_duplicate = ((df_exist['Date'] == today) & (df_exist['Ticker'] == tic)).any()
-                            
-                            if is_duplicate:
-                                pass # 既に保存済みならスキップ
-                            else:
+                            if not is_duplicate:
                                 df_new.to_csv(path, mode='a', header=False, index=False, encoding='utf-8-sig')
-                                print(f"📝 {name_label}保存", end=" ")
+                                print(f"📝", end=" ")
                         except:
                             df_new.to_csv(path, mode='a', header=False, index=False, encoding='utf-8-sig')
                     else:
                         df_new.to_csv(path, index=False, encoding='utf-8-sig')
-                        print(f"🆕 {name_label}作成", end=" ")
-                        
+                        print(f"🆕", end=" ")
                 except Exception as e:
-                    print(f"❌保存エラー:{e}", end=" ")
+                    print(f"x", end=" ")
         else:
-            # 15時前は何もしない（通知のみ）
             pass
 
         # --- コンソール表示 ---
@@ -572,10 +651,25 @@ if __name__ == "__main__":
         sl_str = f"(SL: {sl_price:.0f})" if action == "BUY" and sl_price > 0 else ""
         print(f"-> {action_icon} {conf}% {sl_str}")
 
+        # --- コンソール＆通知表示 ---
         if action == "BUY":
-            sl_str = f"(SL: {sl_price:.0f}円)" if sl_price > 0 else ""
-            msg = f"🔴 **BUY {name}**: {metrics['price']:.0f}円 {sl_str}\n> 理由: {res.get('reason')}"
+            sl_str = f"{sl_price:.0f}" if sl_price > 0 else "-"
+            tp_str = f"{tp_price:.0f}" if tp_price > 0 else "-"
+            
+            # 決算リスクの警告文
+            earnings_warning = ""
+            if earnings_date != "-" and "⚠️" in price_str:
+                 earnings_warning = f"\n⚠️ **注意**: 決算発表({earnings_date})が近いです。持ち越しリスクを考慮してください。"
+
+            msg = (
+                f"🔴 **BUY {name}**: {metrics['price']:.0f}円\n"
+                f"🎯 **利確目標 (TP)**: {tp_str}円\n"
+                f"🛡️ **鉄の掟**: 購入と同時に **{sl_str}円** に「逆指値(損切り)」を入れてください。\n"
+                f"{earnings_warning}\n"
+                f"> 理由: {res.get('reason')}"
+            )
             buy_list.append(msg)
+            
             
         elif action == "SELL":
             msg = f"🔵 **SELL (決済) {name}**: {metrics['price']:.0f}円\n> 理由: {res.get('reason')}"
@@ -583,19 +677,24 @@ if __name__ == "__main__":
             
         time.sleep(2)
 
-    # 通知作成
+    # --- レポート作成 ---
     if buy_list:
-        report_message += "\n🚀 **新規BUY/SELL銘柄**\n" + "\n\n".join(buy_list)
+        report_message += "\n\n🚀 **新規BUY/SELL推奨**\n" + "\n\n".join(buy_list)
     else:
-        report_message += "\n💤 本日は「BUY/SELL」銘柄はありませんでした。"
+        report_message += "\n\n💤 本日は「BUY/SELL」推奨銘柄はありませんでした。"
     
     if not is_closing_time:
-        report_message += "\n(※市場稼働中のため、記録は行っていません)"
+        report_message += "\n\n(※市場稼働中のため、CSVへの記録はスキップされました)"
 
-    # Discord送信
+    # ★追加: 全監視銘柄の株価一覧をレポート末尾に追加
+    if all_stock_prices:
+        report_message += "\n\n" + "="*30 + "\n📉 **全監視銘柄 株価一覧**\n" + "="*30 + "\n"
+        report_message += "\n".join(all_stock_prices)
+
+    # Discord送信 (ファイル添付)
     send_discord_notify(report_message)
 
-    # レポート保存
+    # レポート保存 (ローカル)
     try:
         report_dir = "reports"
         os.makedirs(report_dir, exist_ok=True)
