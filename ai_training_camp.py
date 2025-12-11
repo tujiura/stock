@@ -61,7 +61,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.0-flash' # コストパフォーマンスの良いモデル推奨
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
-TRAINING_ROUNDS = 1500 # 1回の実行で行う回数
+TRAINING_ROUNDS = 5000 # 1回の実行で行う回数
 TIMEFRAME = "1d" 
 CBR_NEIGHBORS_COUNT = 11
 MIN_VOLATILITY = 1.0 
@@ -368,11 +368,12 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
 あなたは百戦錬磨のファンドマネージャーです。
 提供されたデータに基づき、**「確率的優位性」**が最も高いアクション（BUY, HOLD, SELL）を選択してください。
 
+### CONSTRAINTS & RULES (厳格な売買ルール)
+
 **1. ボラティリティ判定 (リスク管理):**
    - **< 2.0%**: [安全圏] 理想的なエントリー環境。
    - **2.0% 〜 2.99%**: [警戒圏] 「強い上昇モメンタム」かつ「出来高倍率 > 1.0」の場合のみ、リスク許容のうえBUY可。
    - **>= 3.0%**: [危険域] **新規BUYは絶対禁止**。保有ポジションは縮小・撤退を推奨。
-
 
 **2. BUY (新規買い) の条件 - 以下の [パターンA] か [パターンB] に合致する場合のみ:**
    *前提: 価格がSMA25の上にあり、ボラティリティが3.0%未満であること。*
@@ -401,13 +402,13 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
 - 出力する前に確認せよ: 「ボラティリティが高いのにBUYしていないか？」「トレンドが下向なのにBUYしていないか？」
 - ルール違反がある場合は、アクションを "HOLD" に修正すること。
 
-### FORMAT (出力形式: JSONのみ)
-Markdown記法や説明文を含めず、以下のJSONオブジェクトのみを出力すること。
+=== 出力 (JSONのみ) ===
 {{
-  "action": "BUY" または "HOLD" または "SELL",
-  "confidence": 0〜100の整数,
-  "stop_loss_price": 数値 (HOLD/SELLの場合は0),
+  "action": "BUY" | "HOLD" | "SELL",
+  "confidence": <int 0-100>,
+  "stop_loss_price": <float> (HOLD/SELLの場合は0),
   "stop_loss_reason": "理由(30文字以内)",
+  "target_price": <float> (BUYの場合の利確目標。HOLD/SELLなら0),
   "reason": "理由(100文字以内)"
 }}
 """
