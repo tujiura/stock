@@ -466,21 +466,31 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
 def send_discord_notify(message):
     if not webhook_url: return
     
-    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
-    filename = f"AI_Report_{today_str}.txt"
+    # 現在時刻を取得 (秒まで)
+    now = datetime.datetime.now()
+    today_str = now.strftime('%Y-%m-%d')
+    time_str = now.strftime('%H:%M') # 時間と分
+    
+    # ファイル名にも時間をいれると履歴管理しやすい
+    filename = f"AI_Report_{now.strftime('%Y%m%d_%H%M')}.txt"
     
     try:
+        # メッセージの冒頭にも時間を追加
+        header = f"⏱️ Report Time: {today_str} {time_str}\n" + "-"*30 + "\n\n"
+        full_content = header + message
+        
         files = {
-            "file": (filename, message.encode('utf-8'))
+            "file": (filename, full_content.encode('utf-8'))
         }
+        
         payload = {
-            "content": f"📊 **本日のAI市場監視レポート ({today_str})**\n詳細は添付ファイルを確認してください。"
+            "content": f"📊 **AI市場監視レポート ({today_str} {time_str})**\n詳細は添付ファイルを確認してください。"
         }
+        
         requests.post(webhook_url, data=payload, files=files)
         print("✅ Discord通知送信 (ファイル添付)")
     except Exception as e:
         print(f"⚠️ Discord送信エラー: {e}")
-
 # ==========================================
 # 5. メイン実行 (実戦監視・全株価記録版)
 # ==========================================
