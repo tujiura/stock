@@ -341,86 +341,66 @@ def create_chart_image(df, ticker_name):
     return buf.getvalue()
 
 def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
+    import re # 関数内でインポート
+
     # トレンド方向の判定
     trend_dir = "上昇" if metrics['trend_momentum'] > 0 else "下降"
     
-    # ボラティリティ警告
-    vol_msg = ""
-    if metrics['entry_volatility'] >= 3.0:
-        vol_msg = "⚠️ 現在ボラティリティが極めて高い(3.0%以上)です。急落リスクがあるため、新規BUYは慎重に判断してください。"
-
-    # プロンプト (KERNEL Framework v3.1 - Enhanced Logic)
+    # プロンプト (KERNEL Framework v5.0 - Data Driven Logic)
+    # データ分析に基づき、閾値を厳密に設定
     prompt = f"""
 ### CONTEXT (入力データ)
 対象銘柄: {ticker}
 
-2. テクニカル指標:
+2. テクニカル指標 (※重要):
    - 日足トレンド: {trend_dir} (勢い: {metrics['trend_momentum']:.2f})
-   - SMA25乖離率: {metrics['sma25_dev']:.2f}% (プラス＝SMAより上)
-   - ボラティリティ: {metrics['entry_volatility']:.2f}%
-   - BB幅(スクイーズ度): {metrics['bb_width']:.2f}%
-   - 出来高倍率: {metrics['volume_ratio']:.2f}倍
+   - SMA25乖離率: {metrics['sma25_dev']:.2f}% (目標: +0.5% 〜 +4.7%)
+   - ボラティリティ: {metrics['entry_volatility']:.2f}% (許容限界: 2.6%)
+   - MACDパワー: {metrics['macd_power']:.2f} (必須: > 0)
+   - BB幅: {metrics['bb_width']:.2f}%
    - RSI(9): {metrics['rsi_9']:.1f}
 
 {similar_cases_text}
 
-### TASK (タスク)
-あなたは百戦錬磨のファンドマネージャーです。
-提供されたデータに基づき、**「確率的優位性」**が最も高いアクション（BUY, HOLD, SELL）を選択してください。
+### TASK
+あなたはデータ至上主義のAIトレーダーです。
+「感情」や「期待」を排除し、以下の**統計的勝率が高い条件**に合致する場合のみ BUY を選択してください。
 
-### CONSTRAINTS & RULES (厳格な売買ルール)
+### RULES (統計的優位性に基づく鉄の掟)
 
-**1. ボラティリティ判定 (リスク管理):**
-   - **< 2.0%**: [安全圏] 理想的なエントリー環境。
-   - **2.0% 〜 2.99%**: [警戒圏] 「強い上昇モメンタム」かつ「出来高倍率 > 1.0」の場合のみ、リスク許容のうえBUY可。
-   - **>= 3.0%**: [危険域] **新規BUYは絶対禁止**。保有ポジションは縮小・撤退を推奨。
+**1. エントリー禁止 (即時HOLD対象):**
+   以下のいずれか1つでも該当する場合は、絶対にBUYしてはならない。
+   - **ボラティリティ >= 2.6%**: (勝率34%以下) 相場が荒れており危険。
+   - **SMA25乖離率 <= 0.5%**: (勝率32%以下) トレンドが出ていない、または逆張り。
+   - **MACDパワー <= 0**: (勝率低) 下落圧力が残っている。
 
-**2. BUY (新規買い) の条件 - 以下の [パターンA] か [パターンB] に合致する場合のみ:**
-   *絶対条件: 価格がSMA25よりも明確に上にあること（乖離率 > 0%）。SMA25割れでの逆張りは禁止。*
+**2. BUY (新規買い) の条件:**
+   *前提: 上記の禁止条件を全てクリアしていること。*
    
-   - **[パターンA: ブレイクアウト] (攻め)**
-     - BB幅が狭い状態(<15%)から拡大傾向にある。
-     - **出来高倍率が 1.2倍以上** に急増している（資金流入）。
-     - RSIは 50〜70 の範囲（勢いがある）。
-     
-   - **[パターンB: 押し目買い] (守り)**
-     - 上昇トレンドが継続中（週足・日足ともに上向き）。
-     - 一時的な調整で、RSIが **40〜55** まで低下している。
-     - SMA25付近で下げ止まりの兆候がある。
+   - **[ゴールデン・ゾーン]:**
+     - SMA25乖離率が **+0.5% 〜 +4.7%** の範囲にある。
+     - MACDパワーがプラスで推移している。
+     - RSIが 40〜65 の範囲（過熱感がない）。
 
-**3. SELL (利益確定・損切り) の条件:**
-   - **トレンド崩壊 (損切り):** 価格がSMA25を **-1%以上** 明確に下回り、回復の兆しがない場合（単なるタッチや一時的な割り込みは押し目の可能性があるため静観せよ）。
-   - **クライマックス (利確):** 短期間で急騰し、RSIが **85以上** に達した、またはSMA25乖離率が **+10%以上** に開いた（過熱）。
-   - **パニック (撤退):** ボラティリティが **3.5%以上** に急拡大し、かつ価格がSMA25を下回っている場合（上昇中のボラ拡大は静観せよ）。
+**3. SELL (決済・損切り) の条件:**
+   ※保有している前提での判断。新規空売りは禁止。
+   - **損切り:** 価格がSMA25を **-1%以上** 下回った場合。
+   - **緊急脱出:** ボラティリティが **3.0%以上** に急拡大した場合（分析データ上の危険ライン）。
+   - **利確:** RSIが **85以上** (過熱)、またはSMA25乖離率が **+10%以上**。
 
-**4. HOLD (様子見) の条件:**
-   - 明確な「サイン」が出ていない中間領域。
-   - 地合い（マクロ）が暴落中で、個別銘柄の買いが危険な場合。
-   - 迷う場合は常にHOLD（ノーポジションは最強のポジション）。
-
-### SCORING (自信度の採点基準)
-- **90-100 (確信):** [パターンA: スクイーズ] に完全合致し、かつ過去の類似事例でも勝率が高い場合のみ。
-- **80-89 (有望):** [パターンB: 押し目] の条件を満たし、トレンドが明確な場合。
-- **60-79 (慎重):** 条件は満たすが、懸念材料（決算前など）がある場合。
-- **0-50:** 条件を満たさない、またはHOLDの場合。
-
-### SELF-CORRECTION (自己検証)
-- 出力する前に確認せよ: 「ボラティリティが高いのにBUYしていないか？」「トレンドが下向なのにBUYしていないか？」
-- ルール違反がある場合は、アクションを "HOLD" に修正すること。
+### SCORING (自信度の採点 - 厳格化)**
+   データ分析の結果、**自信過剰(85点以上)は負けフラグ**であることが判明している。
+   - **80-85 (推奨):** [ゴールデン・ゾーン] に完全に合致し、ボラティリティが2.0%未満の場合。
+   - **60-79 (慎重):** 条件は満たすが、ボラティリティが2.0%〜2.6%の場合。
+   - **0 (論外):** 禁止条件に1つでも該当する場合。自信度を0にせよ。
 
 ### OUTPUT FORMAT (JSON ONLY)
-**必ず以下のJSONフォーマットのみを出力してください。**
-- キーは必ずダブルクォーテーション(")で囲むこと。
-- 最後の要素にカンマを付けないこと。
-- Markdown記法(```json)は不要。
-
-=== 出力 (JSONのみ) ===
 {{
-  "action": "BUY" | "HOLD" | "SELL",
-  "confidence": <int 0-100>,
-  "stop_loss_price": <float> (HOLD/SELLの場合は0),
-  "stop_loss_reason": "理由(30文字以内)",
-  "target_price": <float> (BUYの場合の利確目標。HOLD/SELLなら0),
+  "action": "BUY", "HOLD", "SELL",
+  "confidence": 0-100,
+  "stop_loss_price": 0.0,
+  "stop_loss_reason": "理由",
+  "target_price": 0.0,
   "reason": "理由(100文字以内)"
 }}
 """
@@ -440,21 +420,14 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
         
         # レスポンスチェック
         if not response or not response.parts:
-            # print("⚠️ AI No Response") # 特訓中はログがうるさくなるのでコメントアウト推奨
             return {"action": "HOLD", "confidence": 0, "reason": "AI回答なし(Blocked)", "stop_loss_price": 0}
 
-        # --- JSONクリーニング処理 ---
+        # JSONクリーニング
         text = response.text
-        
-        # 1. Markdownタグ削除
         text = text.replace("```json", "").replace("```", "").strip()
         
-        # 2. 正規表現でJSONオブジェクト部分({ ... })だけを抽出
         match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            text = match.group(0)
-            
-        # 3. よくあるJSONミスの修正 (末尾のカンマ削除)
+        if match: text = match.group(0)
         text = re.sub(r',\s*\}', '}', text)
 
         if not text:
@@ -463,7 +436,6 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
         return json.loads(text)
         
     except json.JSONDecodeError:
-        # JSONエラー時は静かにHOLDを返す
         return {"action": "HOLD", "confidence": 0, "reason": "AI形式エラー", "stop_loss_price": 0}
 
     except Exception as e:
