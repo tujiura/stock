@@ -13,9 +13,8 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import re
-import subprocess # これが必要です
+import subprocess 
 import logging
-
 
 # ==========================================
 # ★追加: GitHub自動同期機能
@@ -23,22 +22,15 @@ import logging
 def auto_git_push(commit_message="Auto update trade memory"):
     """
     学習結果(CSV)を自動でGitHubにプッシュする
-    (競合回避のための pull --rebase 機能付き)
     """
     try:
         print("\n☁️ GitHubへ同期中...")
-        
-        # 1. 変更をステージング
         subprocess.run(["git", "add", "ai_trade_memory_risk_managed.csv"], check=True)
-        
-        # 2. コミット (変更がない場合はエラーになるのでtryで囲む)
         try:
             subprocess.run(["git", "commit", "-m", commit_message], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except subprocess.CalledProcessError:
             print("   (変更がないためコミットはスキップされました)")
-            # 変更がなくても、最新の状態にするためにPullはしておく
             
-        # 3. ★重要: Pushの前に最新データを取得・統合する (Pull --rebase)
         print("   最新データを取得中...")
         try:
             subprocess.run(["git", "pull", "--rebase"], check=True)
@@ -46,13 +38,11 @@ def auto_git_push(commit_message="Auto update trade memory"):
             print("⚠️ Pull中に競合が発生しました。手動で解決してください。")
             return
 
-        # 4. プッシュ
         subprocess.run(["git", "push"], check=True)
         print("✅ 同期完了！クラウドダッシュボードが更新されました。")
         
     except Exception as e:
         print(f"⚠️ GitHub同期エラー: {e}")
-        print("   (Gitがインストールされているか、リポジトリ内か確認してください)")
 
 try:
     from dotenv import load_dotenv
@@ -63,110 +53,52 @@ except ImportError:
 # ==========================================
 # ★設定エリア
 # ==========================================
-GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY").strip()
+GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY", "").strip()
 if not GOOGLE_API_KEY:
-    print("エラー: GOOGLE_API_KEY が設定されていません。")
-    # exit() # 環境によってはコメントアウト
+    print("エラー: GOOGLE_API_KEY (TRAINING_API_KEY) が設定されていません。")
 
 genai.configure(api_key=GOOGLE_API_KEY)
-MODEL_NAME = 'models/gemini-2.0-flash' # コストパフォーマンスの良いモデル推奨
+MODEL_NAME = 'models/gemini-2.0-flash' 
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
-TRAINING_ROUNDS = 500 # 1回の実行で行う回数
+TRAINING_ROUNDS = 500 
 TIMEFRAME = "1d" 
-CBR_NEIGHBORS_COUNT = 11
+CBR_NEIGHBORS_COUNT = 15 
 MIN_VOLATILITY = 1.0 
 
 # 練習用銘柄リスト
 TRAINING_LIST = [
-    # --- 電気機器・半導体・精密 ---
     "8035.T", "6146.T", "6857.T", "6723.T", "7735.T", "6526.T", "6758.T", "6861.T", "6501.T",
-    "6503.T", "6981.T", "6954.T", "7741.T", "6902.T", "6367.T", "6594.T", "7751.T", "6701.T", "6702.T",
-    "6752.T", "6762.T", "6479.T", "7733.T", "6645.T", "6971.T", "6976.T", "6988.T", "7203.T", "7267.T",
-    
-    # --- 自動車・輸送用機器 ---
-    "7201.T", "7269.T", "7270.T", "7202.T", "7211.T", "7259.T", "7261.T", "7272.T", "7011.T", "7012.T",
-    "7013.T",
-    
-    # --- 銀行・証券・保険・その他金融 ---
-    "8306.T", "8316.T", "8411.T", "8766.T", "8725.T", "8591.T", "8604.T", "8308.T", "8309.T", "8331.T",
-    "8354.T", "8473.T", "8601.T", "8630.T", "8697.T", "8750.T", "8795.T", "8570.T", "8593.T",
-    
-    # --- 商社・卸売 ---
-    "8058.T", "8031.T", "8001.T", "8002.T", "8015.T", "2768.T", "8053.T", "2760.T", "7459.T", "8088.T",
-    "9962.T", # 9810.T (日鉄物産) は上場廃止のため削除済み
-    
-    # --- 医薬品 ---
-    "4568.T", "4519.T", "4503.T", "4502.T", "4507.T", "4523.T", "4151.T", "4506.T", "4528.T", "4543.T",
-    "4578.T",
-    
-    # --- 化学・素材 ---
-    "4063.T", "4901.T", "4452.T", "4911.T", "3402.T", "3407.T", "4005.T", "4183.T", "4188.T", "4204.T",
-    "4021.T", "4091.T", "4114.T", "4185.T", "4202.T", "4208.T", "4403.T", "4631.T", "4912.T",
-    
-    # --- 機械 ---
-    "6301.T", "6367.T", "6326.T", "6098.T", "6113.T", "6178.T", "6302.T", "6305.T", "6383.T", "6471.T",
-    "6472.T", "6473.T", "7004.T",
-    
-    # --- 情報通信・サービス ---
-    "9432.T", "9433.T", "9984.T", "9434.T", "4661.T", "6098.T", "9684.T", "9697.T", "4385.T", "2413.T",
-    "3659.T", "3938.T", "4307.T", "4684.T", "4689.T", "4704.T", "4751.T", "4755.T", "6701.T", "9435.T",
-    "9602.T", "9613.T", "9735.T", "9766.T",
-    
-    # --- 小売 ---
-    "9983.T", "3382.T", "8267.T", "9843.T", "3092.T", "7532.T", "2651.T", "2670.T", "3086.T", "3099.T",
-    "3391.T", "7453.T", "8233.T", "8252.T", "9989.T",
-    
-    # --- 建設・不動産 ---
-    "1925.T", "1801.T", "8801.T", "8802.T", "1802.T", "1803.T", "1812.T", "1928.T", "3231.T", "3289.T",
-    "8830.T", "8804.T",
-    
-    # --- 鉄鋼・非鉄・鉱業 ---
-    "5401.T", "5411.T", "1605.T", "5713.T", "5711.T", "5714.T", "5406.T", "5423.T", "5486.T",
-    
-    # --- 電力・ガス・石油 ---
-    "9501.T", "9503.T", "5020.T", "9502.T", "9531.T", "9532.T", "5019.T", "9504.T", "9506.T", "9508.T",
-    
-    # --- 運輸（陸・海・空） ---
-    "9101.T", "9104.T", "9107.T", "9020.T", "9021.T", "9022.T", "9201.T", "9202.T", "9064.T", "9143.T",
-    "9147.T",
-    
-    # --- 食品・その他 ---
-    "2802.T", "2914.T", "2502.T", "2503.T", "2801.T", "2269.T", "2282.T", "4911.T", "7832.T", "7974.T"
+    "6594.T", "7751.T", "6702.T", "6752.T", "6981.T", "6954.T", "6920.T",
+    "7203.T", "7267.T", "7269.T", "7270.T", "7011.T", "6301.T", "6367.T", "6098.T",
+    "8306.T", "8316.T", "8411.T", "8766.T", "8591.T", "8604.T",
+    "8058.T", "8031.T", "8001.T", "8002.T", "8053.T",
+    "9432.T", "9433.T", "9984.T", "4661.T", "9613.T", "2413.T", "4751.T", "4385.T",
+    "9983.T", "3382.T", "8267.T", "2802.T", "2914.T", "4911.T",
+    "9101.T", "9104.T", "9107.T", "9020.T", "9021.T", "9201.T",
+    "5401.T", "1605.T", "5713.T", "4063.T", "4901.T"
 ]
 plt.rcParams['font.family'] = 'sans-serif' 
 
 # ==========================================
 # 1. データ取得 & テクニカル計算
 # ==========================================
-def download_data_safe(ticker, period="2y", interval="1d", retries=3):
-    wait = 1
-    for _ in range(retries):
+def download_data_safe(ticker, period="2y", interval="1d", retries=5):
+    wait = 2
+    for attempt in range(retries):
         try:
-            # yfinanceの共有エラーを無効化して取得
-            import logging
             logging.getLogger('yfinance').setLevel(logging.CRITICAL)
-            
             df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-            
-            if df.empty: 
-                # データが空ならリトライせずにNoneを返す(上場廃止などの可能性が高いため)
-                return None
-            
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.droplevel(1)
-            
-            # データ数が少なすぎる場合もスキップ
-            if len(df) < 50:
-                return None
-                
+            if df.empty: return None
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
+            if len(df) < 50: return None
             return df
-            
         except Exception as e:
-            # その他のエラーは少し待ってリトライ
-            time.sleep(wait)
-            wait += 1
-            
+            if attempt < retries - 1:
+                time.sleep(wait)
+                wait *= 2
+            else:
+                return None
     return None
 
 def calculate_technical_indicators(df):
@@ -177,49 +109,35 @@ def calculate_technical_indicators(df):
     df['MACD'] = exp12 - exp26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
-    # ATR計算
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(14).mean()
-    
-    # 出来高移動平均
     df['VolumeMA5'] = df['Volume'].rolling(5).mean()
     
-    # RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(9).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(9).mean()
     rs = gain / loss
     df['RSI9'] = 100 - (100 / (1 + rs))
-    
     return df.dropna()
 
 def calculate_metrics_enhanced(df, idx):
     curr = df.iloc[idx]
     price = float(curr['Close'])
-    
     sma25 = float(curr['SMA25'])
     sma25_dev = ((price / sma25) - 1) * 100
-    
-    # トレンドの勢い
     prev_sma25 = float(df['SMA25'].iloc[idx-5])
     slope = (sma25 - prev_sma25) / 5
     trend_momentum = (slope / price) * 1000
-    
     macd = float(curr['MACD'])
     signal = float(curr['Signal'])
     macd_power = ((macd - signal) / price) * 10000
-    
     atr = float(curr['ATR'])
     entry_volatility = (atr / price) * 100
-    
-    # BB幅 (スクイーズ判定)
     std = df['Close'].iloc[idx-19:idx+1].std()
     bb_width = (4 * std) / df['Close'].iloc[idx-19:idx+1].mean() * 100
-    
-    # 出来高倍率
     vol_ma5 = float(curr['VolumeMA5'])
     volume_ratio = float(curr['Volume']) / vol_ma5 if vol_ma5 > 0 else 1.0
     
@@ -236,7 +154,7 @@ def calculate_metrics_enhanced(df, idx):
     }
 
 # ==========================================
-# 2. CBRメモリシステム
+# 2. CBRメモリシステム (自動修復機能付き)
 # ==========================================
 class CaseBasedMemory:
     def __init__(self, csv_path):
@@ -244,134 +162,134 @@ class CaseBasedMemory:
         self.scaler = StandardScaler()
         self.knn = None
         self.df = pd.DataFrame()
-        self.feature_cols = ['sma25_dev', 'trend_momentum', 'macd_power', 'entry_volatility']
+        self.feature_cols = ['sma25_dev', 'trend_momentum', 'macd_power', 'entry_volatility', 'rsi_9']
         self.load_and_train()
 
     def load_and_train(self):
         if not os.path.exists(self.csv_path): return
+        
         try:
             self.df = pd.read_csv(self.csv_path)
-            
-            # カラム名を統一
+        except Exception as e:
+            print(f"⚠️ CSV読込エラー: {e}")
+            print("🔄 自動修復モードで再試行...")
+            try:
+                self.df = pd.read_csv(self.csv_path, on_bad_lines='skip')
+                self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
+                print(f"✅ 修復完了 (有効データ: {len(self.df)}件)")
+            except Exception as e2:
+                print(f"❌ 修復失敗: {e2}")
+                return
+
+        try:
             rename_map = {
                 'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 
                 'reason': 'Reason', 'timeframe': 'Timeframe', 
-                'stop_loss_price': 'stop_loss_price', 
-                'stop_loss_reason': 'stop_loss_reason',
                 'result': 'result', 'profit_loss': 'profit_loss',
                 'confidence': 'Confidence'
             }
             self.df.columns = [rename_map.get(col.lower(), col) for col in self.df.columns]
             
-            if len(self.df) < 5: return
-
-            # 特徴量の準備
-            for col in self.feature_cols:
-                 if col not in self.df.columns: self.df[col] = 0.0
+            valid_df = self.df[self.df['result'].isin(['WIN', 'LOSS'])].copy()
             
-            features = self.df[self.feature_cols].fillna(0)
+            if len(valid_df) < 5: return
+
+            for col in self.feature_cols:
+                 if col not in valid_df.columns: valid_df[col] = 0.0
+            
+            features = valid_df[self.feature_cols].fillna(0)
             self.features_normalized = self.scaler.fit_transform(features)
             
+            self.valid_df_for_knn = valid_df 
+            
             global CBR_NEIGHBORS_COUNT
-            self.knn = NearestNeighbors(n_neighbors=min(CBR_NEIGHBORS_COUNT, len(self.df)), metric='euclidean')
+            self.knn = NearestNeighbors(n_neighbors=min(CBR_NEIGHBORS_COUNT, len(valid_df)), metric='euclidean')
             self.knn.fit(self.features_normalized)
-            print(f"Memory Loaded: {len(self.df)} records.")
+            print(f"Memory Loaded: {len(valid_df)} valid records.")
         except Exception as e:
-            print(f"Memory Load Error: {e}")
+            print(f"Memory Init Error: {e}")
 
     def search_similar_cases(self, current_metrics):
-        if self.knn is None or len(self.df) < 5: return "（データ不足）"
+        if self.knn is None: return "（学習データ不足）"
 
-        input_df = pd.DataFrame([current_metrics], columns=self.feature_cols)
+        metrics_vec = []
+        for col in self.feature_cols:
+            metrics_vec.append(current_metrics.get(col, 0))
+            
+        input_df = pd.DataFrame([metrics_vec], columns=self.feature_cols)
         scaled_vec = self.scaler.transform(input_df)
         distances, indices = self.knn.kneighbors(scaled_vec)
         
-        text = f"【類似過去事例 ({len(indices[0])}件)】\n"
+        text = f"【過去の類似局面 ({len(indices[0])}件)】\n"
+        win_c = 0
+        loss_c = 0
+        
         for idx in indices[0]:
-            row = self.df.iloc[idx]
+            row = self.valid_df_for_knn.iloc[idx]
             res = str(row.get('result', ''))
-            icon = "WIN ⭕" if res == 'WIN' else "LOSS ❌" if res == 'LOSS' else "➖"
-            text += f"● {row.get('Date','?')} {row.get('Ticker','?')} -> {icon}\n"
+            if res == 'WIN': win_c += 1
+            if res == 'LOSS': loss_c += 1
+            icon = "⭕" if res == 'WIN' else "❌"
+            text += f"- {row.get('Date')} {row.get('Ticker')}: {icon} (MOM:{row.get('trend_momentum',0):.1f})\n"
+            
+        text += f"-> 類似データ傾向: 勝ち{win_c} / 負け{loss_c}\n"
         return text
 
     def save_experience(self, data_dict):
-        # 保存するカラムの順序を強制（CSV破損防止）
         csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
-            "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", "profit_loss"
+            "sma25_dev", "trend_momentum", "macd_power", "entry_volatility","profit_loss"
         ]
         
         new_df = pd.DataFrame([data_dict])
-        
-        # カラム不足があれば補完し、順序を整える
         for col in csv_columns:
             if col not in new_df.columns: new_df[col] = None
         new_df = new_df[csv_columns]
 
-        # ★強化ポイント: Excelが開いていてもリトライする処理
         max_retries = 5
         for i in range(max_retries):
             try:
                 if not os.path.exists(self.csv_path):
                     new_df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
                 else:
-                    # 追記モード
                     new_df.to_csv(self.csv_path, mode='a', header=False, index=False, encoding='utf-8-sig')
                 
-                # 成功したらループを抜ける
-                print(f"   💾 記録しました") 
-                self.load_and_train() # メモリ再読み込み
+                self.load_and_train() 
                 return
-            
             except PermissionError:
-                if i < max_retries - 1:
-                    print(f"⚠️ CSVがExcel等で開かれています。閉じてください... ({i+1}/{max_retries}回 再試行中)")
-                    time.sleep(3)
-                else:
-                    print("❌ 書き込み失敗: CSVファイルを閉じてから再実行してください。")
+                time.sleep(2)
             except Exception as e:
                 print(f"❌ 保存エラー: {e}")
                 break
 
 # ==========================================
-# 3. AIスパーリング (スナイパー版)
+# 3. AIスパーリング (資産防衛・トレーリングストップ版)
 # ==========================================
 def create_chart_image(df, ticker_name):
-    data = df.tail(100).copy()
+    data = df.tail(75).copy() 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
     ax1.plot(data.index, data['Close'], label='Close', color='black', linewidth=1.2)
-    ax1.plot(data.index, data['SMA25'], label='SMA25', color='orange', alpha=0.8)
+    ax1.plot(data.index, data['SMA25'], label='SMA25', color='orange', alpha=0.8, linestyle='--')
     ax1.set_title(f"{ticker_name} Trend Chart")
-    ax1.legend(loc='upper left'); ax1.grid(True)
+    ax1.legend(loc='upper left'); ax1.grid(True, alpha=0.3)
     ax2.plot(data.index, data['MACD'], label='MACD', color='red', linewidth=1.0)
     ax2.bar(data.index, data['MACD']-data['Signal'], color='gray', alpha=0.3)
+    ax2.grid(True, alpha=0.3)
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=80, bbox_inches='tight'); plt.close(fig); buf.seek(0)
     return buf.getvalue()
 
 def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
-    import re # 関数内でインポート
+    # --- 🛡️ 鉄の掟フィルター ---
+    if metrics['trend_momentum'] < 0:
+        return {"action": "HOLD", "confidence": 0, "reason": "【鉄の掟】下降トレンド中 (Momentum < 0)", "stop_loss_price": 0}
+    if metrics['sma25_dev'] < 0:
+        return {"action": "HOLD", "confidence": 0, "reason": "【鉄の掟】SMA25割れ (戻り待ち)", "stop_loss_price": 0}
+    if metrics['entry_volatility'] > 2.5:
+        return {"action": "HOLD", "confidence": 0, "reason": f"【鉄の掟】ボラティリティ過大 ({metrics['entry_volatility']:.2f}%)", "stop_loss_price": 0}
 
-    # トレンド方向の判定
-    trend_dir = "上昇" if metrics['trend_momentum'] > 0 else "下降"
-    
-    # プロンプト (KERNEL Framework v5.0 - Data Driven Logic)
-    # データ分析に基づき、閾値を厳密に設定
     prompt = f"""
-### CONTEXT (入力データ)
-対象銘柄: {ticker}
-
-2. テクニカル指標 (※重要):
-   - 日足トレンド: {trend_dir} (勢い: {metrics['trend_momentum']:.2f})
-   - SMA25乖離率: {metrics['sma25_dev']:.2f}% (目標: +0.5% 〜 +4.7%)
-   - ボラティリティ: {metrics['entry_volatility']:.2f}% (許容限界: 2.6%)
-   - MACDパワー: {metrics['macd_power']:.2f} (必須: > 0)
-   - BB幅: {metrics['bb_width']:.2f}%
-   - RSI(9): {metrics['rsi_9']:.1f}
-
-{similar_cases_text}
-
 ### TASK
 あなたはデータ至上主義のAIトレーダーです。
 「感情」や「期待」を排除し、以下の**統計的勝率が高い条件**に合致する場合のみ BUY を選択してください。
@@ -392,12 +310,6 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
      - MACDパワーがプラスで推移している。
      - RSIが 40〜65 の範囲（過熱感がない）。
 
-**3. SELL (決済・損切り) の条件:**
-   ※保有している前提での判断。新規空売りは禁止。
-   - **損切り:** 価格がSMA25を **-1%以上** 下回った場合。
-   - **緊急脱出:** ボラティリティが **3.0%以上** に急拡大した場合（分析データ上の危険ライン）。
-   - **利確:** RSIが **85以上** (過熱)、またはSMA25乖離率が **+10%以上**。
-
 ### SCORING (自信度の採点 - 厳格化)**
    データ分析の結果、**自信過剰(85点以上)は負けフラグ**であることが判明している。
    - **80-85 (推奨):** [ゴールデン・ゾーン] に完全に合致し、ボラティリティが2.0%未満の場合。
@@ -414,7 +326,6 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
   "reason": "理由(100文字以内)"
 }}
 """
-    # 安全設定
     safety_settings = {
         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -427,36 +338,20 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
             [prompt, {'mime_type': 'image/png', 'data': chart_bytes}], 
             safety_settings=safety_settings
         )
-        
-        # レスポンスチェック
-        if not response or not response.parts:
-            return {"action": "HOLD", "confidence": 0, "reason": "AI回答なし(Blocked)", "stop_loss_price": 0}
-
-        # JSONクリーニング
-        text = response.text
-        text = text.replace("```json", "").replace("```", "").strip()
-        
+        text = response.text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match: text = match.group(0)
-        text = re.sub(r',\s*\}', '}', text)
-
-        if not text:
-            return {"action": "HOLD", "confidence": 0, "reason": "AI回答が空文字", "stop_loss_price": 0}
-
         return json.loads(text)
-        
-    except json.JSONDecodeError:
-        return {"action": "HOLD", "confidence": 0, "reason": "AI形式エラー", "stop_loss_price": 0}
-
     except Exception as e:
         return {"action": "HOLD", "reason": f"Error: {e}", "confidence": 0, "stop_loss_price": 0}
+
 # ==========================================
-# 4. メイン実行
+# 4. メイン実行 (トレーリングストップ実装版)
 # ==========================================
 def main():
-    print(f"=== AI強化合宿（スナイパー仕様） ===")
+    print(f"=== AI強化合宿（トレーリングストップ実装版） ===")
     
-    memory_system = CaseBasedMemory(LOG_FILE)
+    memory_system = CaseBasedMemory(LOG_FILE) 
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
     except Exception as e: 
         print(f"Model Init Error: {e}")
@@ -471,148 +366,103 @@ def main():
         processed_data[t] = df
 
     if not processed_data:
-        print("データが取得できませんでした。")
+        print("データ不足のため終了します。")
         return
 
     win_count = 0
     loss_count = 0
-    draw_count = 0
     
     print(f"\n🥊 トレーニング開始 ({TRAINING_ROUNDS}ラウンド)\n")
     
     for i in range(1, TRAINING_ROUNDS + 1):
         ticker = random.choice(list(processed_data.keys()))
         df = processed_data[ticker]
-        
-        # ランダムな日付を選ぶ（過去データから）
         if len(df) < 110: continue 
-        target_idx = random.randint(100, len(df) - 10) # 未来の判定用に余裕を持たせる
+        target_idx = random.randint(100, len(df) - 10) 
         current_date_str = df.index[target_idx].strftime('%Y-%m-%d')
-        
         metrics = calculate_metrics_enhanced(df, target_idx)
-        
-        # ボラティリティフィルタ（練習なので少し緩くても良いが、今回は本番同様に表示）
-        # ※ ここではスキップせず、AIにHOLDと判断させる練習とする
         
         cbr_text = memory_system.search_similar_cases(metrics)
         past_df = df.iloc[:target_idx+1]
         chart_bytes = create_chart_image(past_df, ticker)
         
-        # AI判断
         decision = ai_decision_maker(model_instance, chart_bytes, metrics, cbr_text, ticker)
         action = decision.get('action', 'HOLD')
+        
+        # フィルターによる強制HOLDスキップ
+        if action == "HOLD" and "鉄の掟" in decision.get('reason', ''):
+            continue
+
         conf = decision.get('confidence', 0)
-        sl_price_raw = decision.get('stop_loss_price', 0)
-        try: sl_price = float(sl_price_raw)
-        except: sl_price = 0.0
-
-        # アイコン表示の統一
-        if action == "BUY":
-            action_display = "BUY 🔴"
-        elif action == "SELL":
-            action_display = "SELL 🔵"
-        else:
-            action_display = "HOLD 🟡"
-
+        action_display = "BUY 🔴" if action == "BUY" else "HOLD 🟡"
         print(f"Round {i:03}: {ticker} ({current_date_str}) -> {action_display} (自信:{conf}%)")
 
-        # 結果判定（BUYの場合のみ勝敗をつける）
         result = "DRAW"
         profit_loss = 0.0
         
-        # ... (前略: AIが BUY を出した後の処理) ...
-
         if action == "BUY":
-            curr_price = float(metrics['price'])
+            # === ★ここから実装: トレーリングストップ ロジック ===
+            entry_price = float(metrics['price'])
             
-            # 未来5日間のデータをチェック
+            # 初期損切りライン: エントリー価格の-3.0% (固定)
+            current_stop_loss = entry_price * 0.97
+            max_price = entry_price # 最高値追跡用
+
             future_prices = df['Close'].iloc[target_idx+1 : target_idx+6]
             future_lows = df['Low'].iloc[target_idx+1 : target_idx+6]
-            future_highs = df['High'].iloc[target_idx+1 : target_idx+6] # 高値もチェック
+            future_highs = df['High'].iloc[target_idx+1 : target_idx+6]
+            
+            is_win = False
+            is_loss = False
             
             if len(future_prices) > 0:
-                # === 判定ルールの改定 (統計データに基づく) ===
-                # 勝ち: 4%以上の上昇 (損切り幅6.5%に対してリスクリワードを改善)
-                target_profit = curr_price * 1.04 
-                
-                # 負け: 6.5%以上の下落 (統計的な最大許容損失ライン)
-                # ※AIがこれより浅いSLを指定していた場合はそちらを優先しても良いが、
-                #   学習の基準としては「死ななければOK」とするためハードストップを採用
-                stop_loss_threshold = curr_price * 0.935 
-                
-                is_win = False
-                is_loss = False
-                
-                # 1日ずつシミュレーション
                 for j in range(len(future_prices)):
-                    p_close = future_prices.iloc[j]
                     p_low = future_lows.iloc[j]
                     p_high = future_highs.iloc[j]
+                    p_close = future_prices.iloc[j]
                     
-                    # 1. まず損切りにかかったかチェック (安値)
-                    if p_low <= stop_loss_threshold:
-                        is_loss = True
-                        profit_loss = stop_loss_threshold - curr_price # 損切り価格で決済
+                    # 1. 損切りチェック: 安値がストップロスに触れたら即決済
+                    if p_low <= current_stop_loss:
+                        is_loss = True # 損切り
+                        profit_loss = current_stop_loss - entry_price
+                        # print(f"   [Day{j+1}] 損切り発動: {current_stop_loss:.0f}円 (安値:{p_low:.0f})")
                         break
                     
-                    # 2. 次に利確にかかったかチェック (高値)
-                    if p_high >= target_profit:
-                        is_win = True
-                        profit_loss = target_profit - curr_price # 利確価格で決済
-                        break
-                
-                # 期間内に決着がつかなかった場合 (Time Up)
-                if not is_win and not is_loss:
-                    final_p = future_prices.iloc[-1]
-                    profit_loss = final_p - curr_price
-                    
-                    # 最終的にプラスならWIN、マイナスでも-6.5%以内なら「引き分け(DRAW)」扱いにする手もあるが、
-                    # ここではシンプルにプラスマイナスで判定
-                    if profit_loss > 0:
-                        result = "WIN"
-                    else:
-                        result = "LOSS" # 含み損で終了
-                
-                elif is_win:
-                    result = "WIN"
-                else:
-                    result = "LOSS"
+                    # 2. トレーリング: 高値を更新したら損切りラインを引き上げる
+                    if p_high > max_price:
+                        max_price = p_high
+                        # 新しい損切りライン = 最高値の97%
+                        new_stop_loss = max_price * 0.97
+                        
+                        # 損切りラインは「上げる」ことしかしない（下げない）
+                        if new_stop_loss > current_stop_loss:
+                            current_stop_loss = new_stop_loss
+                            # print(f"   [Day{j+1}] StopLoss切上: {current_stop_loss:.0f}円 (高値:{p_high:.0f})")
 
+                # ループ終了後の判定
+                if is_loss:
+                    result = "LOSS" if profit_loss < 0 else "WIN" # トレーリングでプラス域で決済された場合はWIN
+                else:
+                    # 5日間持ちきった場合、最終価格で決済
+                    final_p = future_prices.iloc[-1]
+                    profit_loss = final_p - entry_price
+                    result = "WIN" if profit_loss > 0 else "LOSS"
             else:
                 result = "Unknown"
-                profit_loss = 0
 
-        elif action == "SELL":
-             # 練習モードでのSELLは「逃げの判断が正しかったか」を見る
-             # ここでは簡易的に「その後下がったら正解(WIN)」とする
-             curr_price = float(metrics['price'])
-             future_prices = df['Close'].iloc[target_idx+1 : target_idx+6]
-             if len(future_prices) > 0:
-                 if future_prices.iloc[-1] < curr_price:
-                     result = "WIN" # 下がって正解
-                     profit_loss = curr_price - future_prices.iloc[-1] # 仮想的な利益
-                 else:
-                     result = "LOSS" # 上がってしまった（逃げる必要なかった）
-                     profit_loss = curr_price - future_prices.iloc[-1]
-
-        # 結果表示
-        if action != "HOLD":
             icon = "🏆" if result == "WIN" else "💀" if result == "LOSS" else "➖"
-            print(f"   結果: {icon} {result} (PL: {profit_loss:.1f})")
-            print(f"   理由: {decision.get('reason')}")
+            print(f"   結果: {icon} {result} (PL: {profit_loss:.1f}) > {decision.get('reason')}")
             
             if result == "WIN": win_count += 1
             if result == "LOSS": loss_count += 1
-            if result == "DRAW": draw_count += 1
             
-            # 結果を学習データとして保存
             save_data = {
                 'Date': current_date_str, 'Ticker': ticker, 'Timeframe': TIMEFRAME, 
                 'Action': action, 'result': result, 
                 'Reason': decision.get('reason', 'None'),
                 'Confidence': conf,
-                'stop_loss_price': sl_price, 
-                'stop_loss_reason': decision.get('stop_loss_reason', 'None'), 
+                'stop_loss_price': current_stop_loss, # 最終的なSL価格を記録
+                'stop_loss_reason': "Trailing Stop", 
                 'Price': metrics['price'],
                 'sma25_dev': metrics['sma25_dev'], 
                 'trend_momentum': metrics['trend_momentum'],
@@ -621,15 +471,12 @@ def main():
                 'profit_loss': profit_loss
             }
             memory_system.save_experience(save_data)
-        else:
-            print(f"   (様子見: {decision.get('reason')})")
-
-        print("-" * 50)
-        time.sleep(2) # APIレート制限対策
+        
+        time.sleep(1)
 
     print(f"\n=== 合宿終了 ===")
-    print(f"戦績 (BUY/SELL): {win_count}勝 {loss_count}敗 {draw_count}分")
+    print(f"戦績 (BUY): {win_count}勝 {loss_count}敗")
 
 if __name__ == "__main__":
     main()
-    auto_git_push(commit_message="Training Camp Result Update")
+    auto_git_push(commit_message="Training Camp Result Update (Trailing Stop)")
