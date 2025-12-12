@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 import google.generativeai as genai
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
-
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+import re
 import subprocess # これが必要です
 
 # ==========================================
@@ -61,7 +62,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.0-flash' # コストパフォーマンスの良いモデル推奨
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
-TRAINING_ROUNDS = 7500 # 1回の実行で行う回数
+TRAINING_ROUNDS = 500 # 1回の実行で行う回数
 TIMEFRAME = "1d" 
 CBR_NEIGHBORS_COUNT = 11
 MIN_VOLATILITY = 1.0 
@@ -343,16 +344,15 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
     # トレンド方向の判定
     trend_dir = "上昇" if metrics['trend_momentum'] > 0 else "下降"
     
-    # ボラティリティ警告（基準を 2.0% -> 3.0% に緩和）
+    # ボラティリティ警告
     vol_msg = ""
     if metrics['entry_volatility'] >= 3.0:
         vol_msg = "⚠️ 現在ボラティリティが極めて高い(3.0%以上)です。急落リスクがあるため、新規BUYは慎重に判断してください。"
 
-    # プロンプト (KERNELフレームワーク適用・日本語版)
+    # プロンプト (KERNEL Framework v3.1 - Enhanced Logic)
     prompt = f"""
 ### CONTEXT (入力データ)
 対象銘柄: {ticker}
-
 
 2. テクニカル指標:
    - 日足トレンド: {trend_dir} (勢い: {metrics['trend_momentum']:.2f})
@@ -376,7 +376,7 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
    - **>= 3.0%**: [危険域] **新規BUYは絶対禁止**。保有ポジションは縮小・撤退を推奨。
 
 **2. BUY (新規買い) の条件 - 以下の [パターンA] か [パターンB] に合致する場合のみ:**
-   *前提: 価格がSMA25の上にあり、ボラティリティが3.0%未満であること。*
+   *絶対条件: 価格がSMA25よりも明確に上にあること（乖離率 > 0%）。SMA25割れでの逆張りは禁止。*
    
    - **[パターンA: ブレイクアウト] (攻め)**
      - BB幅が狭い状態(<15%)から拡大傾向にある。
@@ -389,18 +389,30 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
      - SMA25付近で下げ止まりの兆候がある。
 
 **3. SELL (利益確定・損切り) の条件:**
-   - **トレンド崩壊 (損切り):** 価格がSMA25を明確に下回った（終値ベース）。
+   - **トレンド崩壊 (損切り):** 価格がSMA25を **-1%以上** 明確に下回り、回復の兆しがない場合（単なるタッチや一時的な割り込みは押し目の可能性があるため静観せよ）。
    - **クライマックス (利確):** 短期間で急騰し、RSIが **85以上** に達した、またはSMA25乖離率が **+10%以上** に開いた（過熱）。
-   - **パニック (撤退):** ボラティリティが **3.0%以上** に急拡大し、相場がコントロール不能になった。
+   - **パニック (撤退):** ボラティリティが **3.5%以上** に急拡大し、かつ価格がSMA25を下回っている場合（上昇中のボラ拡大は静観せよ）。
 
 **4. HOLD (様子見) の条件:**
    - 明確な「サイン」が出ていない中間領域。
    - 地合い（マクロ）が暴落中で、個別銘柄の買いが危険な場合。
    - 迷う場合は常にHOLD（ノーポジションは最強のポジション）。
 
+### SCORING (自信度の採点基準)
+- **90-100 (確信):** [パターンA: スクイーズ] に完全合致し、かつ過去の類似事例でも勝率が高い場合のみ。
+- **80-89 (有望):** [パターンB: 押し目] の条件を満たし、トレンドが明確な場合。
+- **60-79 (慎重):** 条件は満たすが、懸念材料（決算前など）がある場合。
+- **0-50:** 条件を満たさない、またはHOLDの場合。
+
 ### SELF-CORRECTION (自己検証)
 - 出力する前に確認せよ: 「ボラティリティが高いのにBUYしていないか？」「トレンドが下向なのにBUYしていないか？」
 - ルール違反がある場合は、アクションを "HOLD" に修正すること。
+
+### OUTPUT FORMAT (JSON ONLY)
+**必ず以下のJSONフォーマットのみを出力してください。**
+- キーは必ずダブルクォーテーション(")で囲むこと。
+- 最後の要素にカンマを付けないこと。
+- Markdown記法(```json)は不要。
 
 === 出力 (JSONのみ) ===
 {{
@@ -412,14 +424,50 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
   "reason": "理由(100文字以内)"
 }}
 """
-    try:
-        response = model.generate_content([prompt, {'mime_type': 'image/png', 'data': chart_bytes}])
-        text_clean = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text_clean)
-    except Exception as e:
-        # エラー時はHOLDを返す（安全策）
-        return {"action": "HOLD", "reason": f"Error: {e}", "confidence": 0, "stop_loss_price": 0}
+    # 安全設定
+    safety_settings = {
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+    }
 
+    try:
+        response = model.generate_content(
+            [prompt, {'mime_type': 'image/png', 'data': chart_bytes}], 
+            safety_settings=safety_settings
+        )
+        
+        # レスポンスチェック
+        if not response or not response.parts:
+            # print("⚠️ AI No Response") # 特訓中はログがうるさくなるのでコメントアウト推奨
+            return {"action": "HOLD", "confidence": 0, "reason": "AI回答なし(Blocked)", "stop_loss_price": 0}
+
+        # --- JSONクリーニング処理 ---
+        text = response.text
+        
+        # 1. Markdownタグ削除
+        text = text.replace("```json", "").replace("```", "").strip()
+        
+        # 2. 正規表現でJSONオブジェクト部分({ ... })だけを抽出
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            text = match.group(0)
+            
+        # 3. よくあるJSONミスの修正 (末尾のカンマ削除)
+        text = re.sub(r',\s*\}', '}', text)
+
+        if not text:
+            return {"action": "HOLD", "confidence": 0, "reason": "AI回答が空文字", "stop_loss_price": 0}
+
+        return json.loads(text)
+        
+    except json.JSONDecodeError:
+        # JSONエラー時は静かにHOLDを返す
+        return {"action": "HOLD", "confidence": 0, "reason": "AI形式エラー", "stop_loss_price": 0}
+
+    except Exception as e:
+        return {"action": "HOLD", "reason": f"Error: {e}", "confidence": 0, "stop_loss_price": 0}
 # ==========================================
 # 4. メイン実行
 # ==========================================
@@ -464,12 +512,12 @@ def main():
         # ボラティリティフィルタ（練習なので少し緩くても良いが、今回は本番同様に表示）
         # ※ ここではスキップせず、AIにHOLDと判断させる練習とする
         
-        similar_cases_text = memory_system.search_similar_cases(metrics)
+        cbr_text = memory_system.search_similar_cases(metrics)
         past_df = df.iloc[:target_idx+1]
         chart_bytes = create_chart_image(past_df, ticker)
         
         # AI判断
-        decision = ai_decision_maker(model_instance, chart_bytes, metrics, similar_cases_text, ticker)
+        decision = ai_decision_maker(model_instance, chart_bytes, metrics, cbr_text, ticker)
         action = decision.get('action', 'HOLD')
         conf = decision.get('confidence', 0)
         sl_price_raw = decision.get('stop_loss_price', 0)

@@ -19,6 +19,7 @@ from sklearn.preprocessing import StandardScaler
 import socket
 import requests.packages.urllib3.util.connection as urllib3_cn
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
+import re
 
 # ---------------------------------------------------------
 # ★環境設定
@@ -50,7 +51,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 LOG_FILE = "ai_trade_memory_risk_managed.csv" # 学習用メモリ（AIの脳）
 REAL_TRADE_LOG_FILE = "real_trade_record.csv" # 実戦用ログ（あなたの記録）
 
-MODEL_NAME = 'models/gemini-3-pro-preview' # 最新モデル推奨 (または gemini-2.0-pro-exp)
+MODEL_NAME = 'models/gemini-2.5-pro' # 最新モデル推奨 (または gemini-2.0-pro-exp)
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 11
 
@@ -366,7 +367,7 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
    - **>= 3.0%**: [危険域] **新規BUYは絶対禁止**。保有ポジションは縮小・撤退を推奨。
 
 **2. BUY (新規買い) の条件 - 以下の [パターンA] か [パターンB] に合致する場合のみ:**
-   *前提: 価格がSMA25の上にあり、ボラティリティが3.0%未満であること。*
+   *絶対条件: 価格がSMA25よりも明確に上にあること（乖離率 > 0%）。SMA25割れでの逆張りは禁止。*
    
    - **[パターンA: ブレイクアウト] (攻め)**
      - BB幅が狭い状態(<15%)から拡大傾向にある。
@@ -379,20 +380,30 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
      - SMA25付近で下げ止まりの兆候がある。
 
 **3. SELL (利益確定・損切り) の条件:**
-   - **トレンド崩壊 (損切り):** 価格がSMA25を明確に下回った（終値ベース）。
+   - **トレンド崩壊 (損切り):** 価格がSMA25を **-1%以上** 明確に下回り、回復の兆しがない場合（単なるタッチや一時的な割り込みは押し目の可能性があるため静観せよ）。
    - **クライマックス (利確):** 短期間で急騰し、RSIが **85以上** に達した、またはSMA25乖離率が **+10%以上** に開いた（過熱）。
-   - **パニック (撤退):** ボラティリティが **3.0%以上** に急拡大し、相場がコントロール不能になった。
+   - **パニック (撤退):** ボラティリティが **3.5%以上** に急拡大し、かつ価格がSMA25を下回っている場合（上昇中のボラ拡大は静観せよ）。
 
 **4. HOLD (様子見) の条件:**
    - 明確な「サイン」が出ていない中間領域。
    - 地合い（マクロ）が暴落中で、個別銘柄の買いが危険な場合。
    - 迷う場合は常にHOLD（ノーポジションは最強のポジション）。
 
+### SCORING (自信度の採点基準)
+- **90-100 (確信):** [パターンA: スクイーズ] に完全合致し、かつ過去の類似事例でも勝率が高い場合のみ。
+- **80-89 (有望):** [パターンB: 押し目] の条件を満たし、トレンドが明確な場合。
+- **60-79 (慎重):** 条件は満たすが、懸念材料（決算前など）がある場合。
+- **0-50:** 条件を満たさない、またはHOLDの場合。
+
 ### SELF-CORRECTION (自己検証)
 - 出力する前に確認せよ: 「ボラティリティが高いのにBUYしていないか？」「トレンドが下向なのにBUYしていないか？」
 - ルール違反がある場合は、アクションを "HOLD" に修正すること。
 
-=== 出力 (JSONのみ) ===
+### OUTPUT FORMAT (JSON ONLY)
+**必ず以下のJSONフォーマットのみを出力してください。**
+- キーは必ずダブルクォーテーション(")で囲むこと。
+- 最後の要素にカンマを付けないこと。
+- Markdown記法(```json)は不要。
 {{
   "action": "BUY" | "HOLD" | "SELL",
   "confidence": <int 0-100>,
@@ -402,6 +413,7 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
   "reason": "理由(100文字以内)"
 }}
 """
+    # ★追加: 安全設定
     safety_settings = {
         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -415,16 +427,37 @@ def analyze_vision_agent(model_instance, chart, metrics, cbr_text, macro, news, 
             safety_settings=safety_settings
         )
         
-        if not response.parts:
-            finish_reason = "Unknown"
-            if response.candidates:
-                finish_reason = response.candidates[0].finish_reason
-            
-            print(f"⚠️ AI Blocked: Reason={finish_reason}")
-            return {"action": "HOLD", "confidence": 0, "reason": "AI生成がブロックされました", "stop_loss_price": 0}
+        if not response or not response.parts:
+            print(f"⚠️ AI No Response")
+            return {"action": "HOLD", "confidence": 0, "reason": "AI回答なし(Blocked)", "stop_loss_price": 0}
 
-        text = response.text.replace("```json", "").replace("```", "").strip()
+        # --- JSONクリーニング処理 ---
+        text = response.text
+        
+        # 1. Markdownタグ削除
+        text = text.replace("```json", "").replace("```", "").strip()
+        
+        # 2. 正規表現でJSONオブジェクト部分({ ... })だけを抽出
+        #    (AIが余計な解説文を付けた場合に対応)
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            text = match.group(0)
+            
+        # 3. よくあるJSONミスの修正
+        #    (最後のカンマを削除する簡易的な修正)
+        text = re.sub(r',\s*\}', '}', text)
+
+        if not text:
+            print(f"⚠️ AI Returned Empty Text")
+            return {"action": "HOLD", "confidence": 0, "reason": "AI回答が空文字", "stop_loss_price": 0}
+
         return json.loads(text)
+
+    except json.JSONDecodeError as e:
+        print(f"\n⚠️ AI JSON ERROR: {e}")
+        # デバッグ用に壊れたJSONを表示（コンソールが汚れるので短めに）
+        print(f"   Raw Text: {text[:100]}...") 
+        return {"action": "HOLD", "confidence": 0, "reason": "AI回答の形式エラー", "stop_loss_price": 0}
 
     except Exception as e:
         print(f"\n⚠️ AI ERROR: {e}") 
