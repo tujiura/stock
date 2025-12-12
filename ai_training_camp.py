@@ -14,6 +14,8 @@ from sklearn.preprocessing import StandardScaler
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import re
 import subprocess # これが必要です
+import logging
+
 
 # ==========================================
 # ★追加: GitHub自動同期機能
@@ -21,6 +23,7 @@ import subprocess # これが必要です
 def auto_git_push(commit_message="Auto update trade memory"):
     """
     学習結果(CSV)を自動でGitHubにプッシュする
+    (競合回避のための pull --rebase 機能付き)
     """
     try:
         print("\n☁️ GitHubへ同期中...")
@@ -33,16 +36,23 @@ def auto_git_push(commit_message="Auto update trade memory"):
             subprocess.run(["git", "commit", "-m", commit_message], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except subprocess.CalledProcessError:
             print("   (変更がないためコミットはスキップされました)")
+            # 変更がなくても、最新の状態にするためにPullはしておく
+            
+        # 3. ★重要: Pushの前に最新データを取得・統合する (Pull --rebase)
+        print("   最新データを取得中...")
+        try:
+            subprocess.run(["git", "pull", "--rebase"], check=True)
+        except subprocess.CalledProcessError:
+            print("⚠️ Pull中に競合が発生しました。手動で解決してください。")
             return
 
-        # 3. プッシュ
+        # 4. プッシュ
         subprocess.run(["git", "push"], check=True)
         print("✅ 同期完了！クラウドダッシュボードが更新されました。")
         
     except Exception as e:
         print(f"⚠️ GitHub同期エラー: {e}")
         print("   (Gitがインストールされているか、リポジトリ内か確認してください)")
-
 
 try:
     from dotenv import load_dotenv
@@ -371,7 +381,7 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
 **1. エントリー禁止 (即時HOLD対象):**
    以下のいずれか1つでも該当する場合は、絶対にBUYしてはならない。
    - **ボラティリティ >= 2.6%**: (勝率34%以下) 相場が荒れており危険。
-   - **SMA25乖離率 <= 0.5%**: (勝率32%以下) トレンドが出ていない、または逆張り。
+   - **SMA25乖離率 <= 0.5%**: (勝率32%以下) トレンドが出ていない、または逆張り。SMA25は四捨五入ではなく
    - **MACDパワー <= 0**: (勝率低) 下落圧力が残っている。
 
 **2. BUY (新規買い) の条件:**
@@ -510,40 +520,67 @@ def main():
         result = "DRAW"
         profit_loss = 0.0
         
+        # ... (前略: AIが BUY を出した後の処理) ...
+
         if action == "BUY":
             curr_price = float(metrics['price'])
+            
             # 未来5日間のデータをチェック
             future_prices = df['Close'].iloc[target_idx+1 : target_idx+6]
             future_lows = df['Low'].iloc[target_idx+1 : target_idx+6]
+            future_highs = df['High'].iloc[target_idx+1 : target_idx+6] # 高値もチェック
             
             if len(future_prices) > 0:
-                # 簡易判定: 5日以内に2%上昇で勝ち、損切り価格割れor2%下落で負け
-                target_profit = curr_price * 1.02
-                target_loss = sl_price if sl_price > 0 else curr_price * 0.98
+                # === 判定ルールの改定 (統計データに基づく) ===
+                # 勝ち: 4%以上の上昇 (損切り幅6.5%に対してリスクリワードを改善)
+                target_profit = curr_price * 1.04 
+                
+                # 負け: 6.5%以上の下落 (統計的な最大許容損失ライン)
+                # ※AIがこれより浅いSLを指定していた場合はそちらを優先しても良いが、
+                #   学習の基準としては「死ななければOK」とするためハードストップを採用
+                stop_loss_threshold = curr_price * 0.935 
                 
                 is_win = False
                 is_loss = False
                 
+                # 1日ずつシミュレーション
                 for j in range(len(future_prices)):
-                    p = future_prices.iloc[j]
-                    l = future_lows.iloc[j]
+                    p_close = future_prices.iloc[j]
+                    p_low = future_lows.iloc[j]
+                    p_high = future_highs.iloc[j]
                     
-                    if l <= target_loss:
+                    # 1. まず損切りにかかったかチェック (安値)
+                    if p_low <= stop_loss_threshold:
                         is_loss = True
-                        profit_loss = l - curr_price
+                        profit_loss = stop_loss_threshold - curr_price # 損切り価格で決済
                         break
-                    if p >= target_profit:
+                    
+                    # 2. 次に利確にかかったかチェック (高値)
+                    if p_high >= target_profit:
                         is_win = True
-                        profit_loss = p - curr_price
+                        profit_loss = target_profit - curr_price # 利確価格で決済
                         break
                 
-                if is_win: result = "WIN"
-                elif is_loss: result = "LOSS"
-                else: 
-                    # 5日後までの変化
+                # 期間内に決着がつかなかった場合 (Time Up)
+                if not is_win and not is_loss:
                     final_p = future_prices.iloc[-1]
                     profit_loss = final_p - curr_price
-                    result = "WIN" if profit_loss > 0 else "LOSS"
+                    
+                    # 最終的にプラスならWIN、マイナスでも-6.5%以内なら「引き分け(DRAW)」扱いにする手もあるが、
+                    # ここではシンプルにプラスマイナスで判定
+                    if profit_loss > 0:
+                        result = "WIN"
+                    else:
+                        result = "LOSS" # 含み損で終了
+                
+                elif is_win:
+                    result = "WIN"
+                else:
+                    result = "LOSS"
+
+            else:
+                result = "Unknown"
+                profit_loss = 0
 
         elif action == "SELL":
              # 練習モードでのSELLは「逃げの判断が正しかったか」を見る
