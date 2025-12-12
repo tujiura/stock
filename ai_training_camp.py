@@ -431,8 +431,9 @@ def main():
             continue
 
         conf = decision.get('confidence', 0)
-        action_display = "BUY 🔴" if action == "BUY" else "HOLD 🟡"
-        print(f"Round {i:03}: {ticker} ({current_date_str}) -> {action_display} (自信:{conf}%)")
+        if action == "BUY" :
+            action_display = "BUY 🔴" 
+            print(f"Round {i:03}: {ticker} ({current_date_str}) -> {action_display} (自信:{conf}%)")
 
         result = "DRAW"
         profit_loss = 0.0
