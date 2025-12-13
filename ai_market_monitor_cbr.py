@@ -27,7 +27,6 @@ import logging
 # ---------------------------------------------------------
 sys.stdout.reconfigure(encoding='utf-8')
 
-# IPv4強制 (通信安定化)
 def allowed_gai_family():
     return socket.AF_INET
 urllib3_cn.allowed_gai_family = allowed_gai_family
@@ -56,25 +55,19 @@ MODEL_NAME = 'models/gemini-2.0-flash'
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
 
-# 監視リスト (ユーザー指定の厳選80銘柄)
+# 監視リスト
 WATCH_LIST = [
-    # --- 🏆 エース級 ---
     "6146.T", "8035.T", "9983.T", "7741.T", "6857.T", "7012.T", "6367.T", "7832.T",
     "1801.T", "9766.T", "2801.T", "4063.T", "4543.T", "4911.T", "4507.T",
-    # --- 🛡️ 安定・ディフェンシブ ---
     "9432.T", "9433.T", "9434.T", "4503.T", "4502.T", "2502.T", "2503.T", "2802.T",
     "4901.T", "1925.T", "1928.T", "1802.T", "1803.T", "1812.T", "9020.T", "9021.T",
     "9532.T", "9735.T", "9613.T",
-    # --- 💰 金融・銀行 ---
     "8306.T", "8316.T", "8411.T", "8308.T", "8309.T", "8331.T", "8354.T", "8766.T",
     "8725.T", "8591.T", "8593.T", "8604.T", "8473.T", "8630.T", "8697.T",
-    # --- 🏢 商社・卸売 ---
     "8058.T", "8031.T", "8001.T", "8002.T", "8015.T", "2768.T", "8053.T", "7459.T",
     "8088.T", "9962.T", "3092.T", "3382.T",
-    # --- 🏭 重厚長大・自動車 ---
     "7011.T", "7013.T", "6301.T", "7203.T", "7267.T", "7269.T", "7270.T", "7201.T",
     "5401.T", "5411.T", "5713.T", "1605.T", "5020.T",
-    # --- 📦 その他・機械 ---
     "6501.T", "6503.T", "6305.T", "6326.T", "6383.T", "6471.T", "6473.T", "7751.T"
 ]
 
@@ -98,7 +91,6 @@ def download_data_safe(ticker, period="6mo", interval="1d", retries=3):
     return None
 
 def get_macro_data():
-    """主要指数を取得"""
     tickers = {"^N225": "日経平均", "JPY=X": "ドル円", "^GSPC": "米S&P500", "^TNX": "米10年債", "^VIX": "VIX"}
     report = "【🌎 マクロ環境】\n"
     try:
@@ -222,11 +214,12 @@ class CaseBasedMemory:
         self.df = pd.DataFrame()
         self.feature_cols = ['sma25_dev', 'trend_momentum', 'macd_power', 'entry_volatility', 'rsi_9']
         
+        # ★ rsi_9 を含むカラム定義
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
-            "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", "rsi_9", 
-            "profit_loss", "profit_rate" 
+            "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", 
+            "rsi_9", "profit_loss", "profit_rate" 
         ]
         self.load_and_train()
 
@@ -239,7 +232,9 @@ class CaseBasedMemory:
             # --- スキーマ自動更新 ---
             missing_cols = [col for col in self.csv_columns if col not in self.df.columns]
             if missing_cols:
-                for col in missing_cols: self.df[col] = 0.0
+                print(f"🔧 CSVスキーマ更新: {missing_cols} を追加します...")
+                for col in missing_cols:
+                    self.df[col] = 0.0
                 self.df = self.df[self.csv_columns]
                 self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
 
@@ -334,7 +329,7 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, macro, news, fundam
 
 【ニュース】
 {news}
-### PAST SIMILAR CASES
+
 {cbr_text}
 
 ### TASK
@@ -444,7 +439,6 @@ if __name__ == "__main__":
         metrics = calculate_metrics_enhanced(df)
         if metrics is None: print("Skip"); continue
         
-        # --- 株価リスト用データ作成 (フィルター前に実施) ---
         current_price = metrics['price']
         try:
             prev_close = df['Close'].iloc[-2]
@@ -455,11 +449,10 @@ if __name__ == "__main__":
             price_str = f"• {tic}: {current_price:,.0f}円"
         all_stock_prices.append(price_str)
 
-        # 3. 鉄の掟フィルター (最適化: 2.3%)
+        # 3. 鉄の掟フィルター
         if metrics['trend_momentum'] < 0 or metrics['sma25_dev'] < 0 or metrics['entry_volatility'] > 2.3:
              print("⏹️ Filtered"); continue
 
-        # 付加情報取得
         earnings_date = get_earnings_date(tic)
         cbr_text = memory.search_similar_cases(metrics)
         chart = create_chart_image(df, tic)
@@ -472,20 +465,21 @@ if __name__ == "__main__":
         action = res.get('action', 'HOLD')
         conf = res.get('confidence', 0)
         
-        # ATRトレーリングストップ計算 (BUYの場合)
+        # ATRトレーリングストップ計算
         stop_loss_price = 0
         if action == "BUY":
             atr_stop = metrics['atr_value'] * 2.0
             stop_loss_price = metrics['price'] - atr_stop
         
-        # CSVデータ作成 (★profit_rate 0.0で初期化)
+        # CSVデータ作成 (★rsi_9 を保存)
         item = {
             "Date": today, "Ticker": tic, "Timeframe": TIMEFRAME, 
             "Action": action, "result": "", "Reason": res.get('reason', 'None'), 
             "Confidence": conf, "stop_loss_price": stop_loss_price, "stop_loss_reason": "ATR_Trailing_Stop",
             "Price": metrics['price'], "sma25_dev": metrics['sma25_dev'], 
             "trend_momentum": metrics['trend_momentum'], "macd_power": metrics['macd_power'],
-            "entry_volatility": metrics['entry_volatility'],
+            "entry_volatility": metrics['entry_volatility'], 
+            "rsi_9": metrics['rsi_9'], # <--- 追加
             "profit_loss": 0,
             "profit_rate": 0.0 
         }
@@ -529,7 +523,6 @@ if __name__ == "__main__":
     else:
         report_message += "\n\n💤 推奨なし"
 
-    # 全銘柄リストを追加
     if all_stock_prices:
         report_message += "\n\n" + "="*30 + "\n📉 **監視銘柄 株価一覧**\n" + "="*30 + "\n"
         report_message += "\n".join(all_stock_prices)

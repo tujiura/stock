@@ -61,11 +61,11 @@ genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.0-flash' 
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
-TRAINING_ROUNDS = 3000 
+TRAINING_ROUNDS = 15000
 TIMEFRAME = "1d" 
 CBR_NEIGHBORS_COUNT = 15 
 MIN_VOLATILITY = 1.0 
-TRADE_BUDGET = 1000000 # ★1トレードあたりの予算（100万円）
+TRADE_BUDGET = 1000000 # 1トレードあたりの予算
 
 # 練習用銘柄リスト
 TRAINING_LIST = [
@@ -84,7 +84,7 @@ plt.rcParams['font.family'] = 'sans-serif'
 # ==========================================
 # 1. データ取得 & テクニカル計算
 # ==========================================
-def download_data_safe(ticker, period="2y", interval="1d", retries=5):
+def download_data_safe(ticker, period="10y", interval="1d", retries=5):
     wait = 2
     for attempt in range(retries):
         try:
@@ -155,7 +155,7 @@ def calculate_metrics_enhanced(df, idx):
     }
 
 # ==========================================
-# 2. CBRメモリシステム
+# 2. CBRメモリシステム (★自動修復・過去データ計算付き)
 # ==========================================
 class CaseBasedMemory:
     def __init__(self, csv_path):
@@ -164,11 +164,13 @@ class CaseBasedMemory:
         self.knn = None
         self.df = pd.DataFrame()
         self.feature_cols = ['sma25_dev', 'trend_momentum', 'macd_power', 'entry_volatility', 'rsi_9']
+        
+        # 保存するCSVの列定義 (rsi_9, profit_rate を含む)
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
-            "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", "rsi_9", 
-            "profit_loss", "profit_rate"
+            "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", 
+            "rsi_9", "profit_loss", "profit_rate"
         ]
         self.load_and_train()
 
@@ -177,22 +179,48 @@ class CaseBasedMemory:
         
         try:
             self.df = pd.read_csv(self.csv_path)
-            missing_cols = [col for col in self.csv_columns if col not in self.df.columns]
-            if missing_cols:
-                for col in missing_cols: self.df[col] = 0.0 
-                self.df = self.df[self.csv_columns]
+            
+            # --- スキーマ更新 & 過去データの再計算 ---
+            cols_added = False
+            
+            # 1. 不足カラムの追加
+            for col in self.csv_columns:
+                if col not in self.df.columns:
+                    self.df[col] = 0.0 if col != 'Reason' else ''
+                    cols_added = True
+            
+            # 2. 利益率(profit_rate)が 0 の過去データについて、損益と価格から逆算
+            #    (profit_loss / Price) * 100
+            if 'profit_rate' in self.df.columns and 'profit_loss' in self.df.columns and 'Price' in self.df.columns:
+                # profit_rateが0 または NaN で、かつ Price が0じゃない行を抽出
+                mask = (self.df['profit_rate'] == 0) & (self.df['profit_loss'] != 0) & (self.df['Price'] != 0)
+                if mask.any():
+                    print(f"🔄 過去データの利益率を自動計算して補完します ({mask.sum()}件)...")
+                    self.df.loc[mask, 'profit_rate'] = (self.df.loc[mask, 'profit_loss'] / self.df.loc[mask, 'Price']) * 100
+                    cols_added = True
+
+            # 変更があれば保存
+            if cols_added:
+                self.df = self.df[self.csv_columns] # 列順序を整える
                 self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
+                print("✅ CSVファイルを最新形式にアップデートしました。")
+
         except Exception as e:
             print(f"⚠️ CSV読込エラー: {e}")
             try:
                 self.df = pd.read_csv(self.csv_path, on_bad_lines='skip')
-                missing_cols = [col for col in self.csv_columns if col not in self.df.columns]
-                for col in missing_cols: self.df[col] = 0.0
+                # 最小限の復旧
+                for col in self.csv_columns:
+                    if col not in self.df.columns: self.df[col] = 0.0
                 self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
             except Exception: return
 
         try:
-            rename_map = {'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 'result': 'result', 'profit_loss': 'profit_loss'}
+            rename_map = {
+                'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 
+                'result': 'result', 'profit_loss': 'profit_loss',
+                'rsi_9': 'rsi_9', 'rsi': 'rsi_9'
+            }
             self.df.columns = [rename_map.get(col.lower(), col) for col in self.df.columns]
             
             valid_df = self.df[self.df['result'].isin(['WIN', 'LOSS'])].copy()
@@ -251,7 +279,7 @@ class CaseBasedMemory:
                 print(f"❌ 保存エラー: {e}"); break
 
 # ==========================================
-# 3. AIスパーリング (ATRトレーリングストップ版)
+# 3. AIスパーリング
 # ==========================================
 def create_chart_image(df, ticker_name):
     data = df.tail(75).copy() 
@@ -268,8 +296,7 @@ def create_chart_image(df, ticker_name):
     return buf.getvalue()
 
 def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
-    # --- 🛡️ 鉄の掟フィルター (厳格化版) ---
-    # ボラティリティ閾値を 2.5 -> 2.0 に強化
+    # --- 🛡️ 鉄の掟フィルター (2.3%採用) ---
     if metrics['entry_volatility'] > 2.3:
         return {"action": "HOLD", "confidence": 0, "reason": f"【鉄の掟】ボラティリティ過大 ({metrics['entry_volatility']:.2f}%)", "stop_loss_price": 0}
     if metrics['trend_momentum'] < 0:
@@ -283,10 +310,11 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
 【テクニカル指標】
 - トレンド勢い: {metrics['trend_momentum']:.2f} (プラス必須)
 - SMA25乖離率: {metrics['sma25_dev']:.2f}% (プラス圏)
-- ボラティリティ: {metrics['entry_volatility']:.2f}% (2.0%以下推奨)
+- ボラティリティ: {metrics['entry_volatility']:.2f}% (2.3%以下推奨)
 - RSI(9): {metrics['rsi_9']:.1f}
 - ATR: {metrics['atr_value']:.1f}
-### PAST SIMILAR CASES
+
+【ニュース】
 {similar_cases_text}
 ### TASK
 「資産防衛型AI」として「買い (BUY)」か「様子見 (HOLD)」のみ判定せよ。空売り不可。
@@ -335,11 +363,10 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
         return {"action": "HOLD", "reason": f"Error: {e}", "confidence": 0, "stop_loss_price": 0}
 
 # ==========================================
-# 4. メイン実行 (定額投資シミュレーション版)
+# 4. メイン実行 (★可変式トレーリング & 過去データ補完版)
 # ==========================================
 def main():
-    print(f"=== AI強化合宿 (勝ち逃げ特化: 即時追従 & 建値ガード) ===")
-    print(f"設定: 資金 {TRADE_BUDGET:,}円 | トレーリング開始:即時(ATR x2.0) -> +3%(x1.0) -> +5%(x0.5)")
+    print(f"=== AI強化合宿 (可変式トレーリング + データ自動修復) ===")
     
     memory_system = CaseBasedMemory(LOG_FILE) 
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
@@ -384,16 +411,14 @@ def main():
         result = "DRAW"; profit_loss = 0.0; profit_rate = 0.0
         
         if action == "BUY":
-            # --- 資金管理シミュレーション ---
             entry_price = float(metrics['price'])
             shares = int(TRADE_BUDGET // entry_price)
             if shares < 1: shares = 1
             invested_capital = shares * entry_price
 
-            # ATRトレーリングストップ (★勝ち逃げ仕様)
             current_atr = float(metrics['atr_value']) 
             
-            # 初期設定: ATR x 2.0 (標準)
+            # 初期SL: ATR x 2.0
             current_stop_loss = entry_price - (current_atr * 2.0)
             max_price = entry_price 
 
@@ -408,30 +433,25 @@ def main():
                 for j in range(len(future_prices)):
                     p_low = future_lows.iloc[j]; p_high = future_highs.iloc[j]
                     
-                    # 損切り判定
                     if p_low <= current_stop_loss:
                         is_loss = True
                         final_exit_price = current_stop_loss 
                         break
                     
-                    # トレーリング判定 (★即時追従 & 鬼の利食い)
+                    # ラチェット式トレーリング
                     if p_high > max_price:
                         max_price = p_high
                         current_profit_pct = (max_price - entry_price) / entry_price
                         
-                        # ラチェット機能: 利益が出るほど絞める
-                        if current_profit_pct > 0.05: # +5%超え
-                            trail_width = current_atr * 0.5 # ほぼ利確
-                        elif current_profit_pct > 0.03: # +3%超え
-                            trail_width = current_atr * 1.0 # 激狭
-                        else:
-                            trail_width = current_atr * 2.0 # 標準 (最初から追従)
+                        if current_profit_pct > 0.05: trail_width = current_atr * 0.5 
+                        elif current_profit_pct > 0.03: trail_width = current_atr * 1.0 
+                        else: trail_width = current_atr * 2.0 
                             
                         new_stop_loss = max_price - trail_width
                         
-                        # ★建値ガード: +1.5%乗ったら絶対に負けない
+                        # 建値ガード
                         if current_profit_pct > 0.015:
-                             break_even_price = entry_price + (entry_price * 0.001) # 微益撤退ライン
+                             break_even_price = entry_price * 1.001
                              new_stop_loss = max(new_stop_loss, break_even_price)
 
                         if new_stop_loss > current_stop_loss:
@@ -440,7 +460,6 @@ def main():
                 if not is_loss:
                     final_exit_price = future_prices.iloc[-1] 
 
-                # 損益計算
                 profit_loss = (final_exit_price - entry_price) * shares
                 profit_rate = ((final_exit_price - entry_price) / entry_price) * 100
                 
@@ -460,18 +479,17 @@ def main():
                 'Action': action, 'result': result, 
                 'Reason': decision.get('reason', 'None'),
                 'Confidence': conf,
-                'stop_loss_price': current_stop_loss, 'stop_loss_reason': "Aggressive_Trailing", 
+                'stop_loss_price': current_stop_loss, 'stop_loss_reason': "Dynamic_Trailing_Stop", 
                 'Price': metrics['price'], 'sma25_dev': metrics['sma25_dev'], 
                 'trend_momentum': metrics['trend_momentum'], 'macd_power': metrics['macd_power'],
                 'entry_volatility': metrics['entry_volatility'], 'rsi_9': metrics['rsi_9'], 
-                'profit_loss': profit_loss, 'profit_rate': profit_rate
+                'profit_loss': profit_loss, 'profit_rate': profit_rate # ★必須
             }
             memory_system.save_experience(save_data)
         time.sleep(1)
 
     print(f"\n=== 合宿終了 ===")
     print(f"戦績 (BUY): {win_count}勝 {loss_count}敗")
-    print(f"シミュレーション設定: {TRADE_BUDGET:,}円/トレード")
     print(f"合計損益: {total_profit_loss:+.0f}円")
     
     total_invested_sum = total_invested_count * TRADE_BUDGET
@@ -481,4 +499,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    auto_git_push(commit_message="Training Camp: Aggressive Trailing & Break-Even")
+    auto_git_push(commit_message="Training Camp: Data Repair & Profit Rate")

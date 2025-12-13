@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import os
-import datetime
+import numpy as np
 
 # ==========================================
 # ★設定: ページ構成
@@ -15,228 +15,183 @@ st.set_page_config(
 )
 
 # タイトル
-st.title("🎯 AI Sniper Control Room")
+st.title("🎯 AI Sniper Control Room v2.0")
 st.markdown("### 資産防衛型AI 自動売買・戦績分析ダッシュボード")
 
 # ==========================================
 # 1. データ読み込み
 # ==========================================
-DATA_FILE = "ai_trade_memory_risk_managed.csv" # 実戦データのみ
+DATA_FILE = "ai_trade_memory_risk_managed.csv" 
 
-# ---------------------------------------------------------
-# データの読み込み (修正版: エラー回避機能付き)
-# ---------------------------------------------------------
 @st.cache_data(ttl=60)
 def load_data():
     if not os.path.exists(DATA_FILE):
         return pd.DataFrame()
     
     try:
-        # ファイル読み込み
+        # ファイル読み込み (エラー行スキップ)
         df = pd.read_csv(DATA_FILE, on_bad_lines='skip')
         
-        # 1. カラム名の空白削除
+        # カラム名の正規化 (空白削除・小文字対応)
         df.columns = [c.strip() for c in df.columns]
-        
-        # 2. カラム名の正規化
         rename_map = {
-            'ticker': 'Ticker', 'date': 'Date', 'timeframe': 'Timeframe',
-            'action': 'Action', 'result': 'result', 'price': 'Price',
-            'reason': 'Reason', 'confidence': 'Confidence',
-            'profit_loss': 'profit_loss', 'entry_volatility': 'entry_volatility'
+            'ticker': 'Ticker', 'date': 'Date', 'action': 'Action', 
+            'result': 'result', 'profit_loss': 'profit_loss',
+            'profit_rate': 'profit_rate', 'reason': 'Reason',
+            'stop_loss_reason': 'stop_loss_reason'
         }
-        new_cols = []
-        for col in df.columns:
-            new_cols.append(rename_map.get(col.lower(), col))
-        df.columns = new_cols
+        df.columns = [rename_map.get(col.lower(), col) for col in df.columns]
         
-        # ★追加: Date列を日付型に強制変換
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-            # 変換に失敗した行（NaT）があれば削除しておくのが安全
-            df = df.dropna(subset=['Date'])
-
-        # 数値変換 (profit_lossなど)
+        # 日付変換
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df = df.dropna(subset=['Date'])
+        df = df.sort_values('Date')
+        
+        # 数値変換
         if 'profit_loss' in df.columns:
             df['profit_loss'] = pd.to_numeric(df['profit_loss'], errors='coerce').fillna(0)
+        else:
+            df['profit_loss'] = 0.0
+            
+        if 'profit_rate' not in df.columns:
+            df['profit_rate'] = 0.0
+        else:
+            df['profit_rate'] = pd.to_numeric(df['profit_rate'], errors='coerce').fillna(0)
 
+        # 累積損益
+        df['Equity'] = df['profit_loss'].cumsum()
+        
         return df
     except Exception as e:
-        st.error(f"ファイル読み込みエラー: {e}")
+        st.error(f"データ読み込みエラー: {e}")
         return pd.DataFrame()
 
-# データをロード
-df_raw = load_data()
+df = load_data()
 
-# ★追加: データが空、またはTicker列がない場合の安全装置
-if df_raw.empty or 'Ticker' not in df_raw.columns:
-    st.warning(f"⚠️ データファイル ({DATA_FILE}) がまだ空か、正しいフォーマットではありません。")
-    st.info("データが記録されるまでお待ちください。")
-    st.stop() # ここで処理を停止し、エラー画面を出さない
-
-# ==========================================
-# 2. サイドバー (フィルタリング機能)
-# ==========================================
-st.sidebar.header("🔍 検索フィルタ")
-
-# キャッシュクリアボタン
-if st.sidebar.button("🔄 データを更新"):
+# 更新ボタン
+if st.button('🔄 データを最新に更新'):
     st.cache_data.clear()
     st.rerun()
+
+if df.empty:
+    st.warning("データファイルが見つかりません。トレーニングを実行してください。")
+    st.stop()
+
+# ==========================================
+# 2. KPI メトリクス (上部表示)
+# ==========================================
+# BUYエントリーかつ結果が出ているものだけ抽出
+df_results = df[(df['Action'] == 'BUY') & (df['result'].isin(['WIN', 'LOSS']))].copy()
+
+if len(df_results) > 0:
+    total_trades = len(df_results)
+    wins = len(df_results[df_results['result'] == 'WIN'])
+    losses = len(df_results[df_results['result'] == 'LOSS'])
+    win_rate = (wins / total_trades) * 100
     
-# 銘柄フィルタ
-tickers = ["ALL"] + list(df_raw['Ticker'].unique())
-selected_ticker = st.sidebar.selectbox("銘柄を選択", tickers)
-
-# 期間フィルタ
-if 'Date' in df_raw.columns:
-    min_date = df_raw['Date'].min()
-    max_date = df_raw['Date'].max()
+    total_pl = df_results['profit_loss'].sum()
+    avg_pl = df_results['profit_loss'].mean()
     
-    # 日付が取得できない場合の安全策
-    if pd.isna(min_date):
-        min_date = datetime.date.today()
-        max_date = datetime.date.today()
-    else:
-        # datetime型からdate型へ変換
-        min_date = min_date.date()
-        max_date = max_date.date()
+    # 利益率ベースの計算
+    avg_return = df_results['profit_rate'].mean()
+    avg_win_rate = df_results[df_results['result'] == 'WIN']['profit_rate'].mean()
+    avg_loss_rate = df_results[df_results['result'] == 'LOSS']['profit_rate'].mean()
     
-    start_date, end_date = st.sidebar.date_input(
-        "期間を選択",
-        [min_date, max_date]
-    )
+    # プロフィットファクター (総利益 / 総損失の絶対値)
+    gross_profit = df_results[df_results['profit_loss'] > 0]['profit_loss'].sum()
+    gross_loss = abs(df_results[df_results['profit_loss'] < 0]['profit_loss'].sum())
+    pf = gross_profit / gross_loss if gross_loss > 0 else float('inf')
 
-# --- データの絞り込み ---
-df = df_raw.copy()
-
-if selected_ticker != "ALL":
-    df = df[df['Ticker'] == selected_ticker]
-
-# 日付フィルタの適用
-if 'Date' in df.columns:
-    df = df[(df['Date'].dt.date >= start_date) & (df['Date'].dt.date <= end_date)]
-
-# --- 詳細フィルター (Action & Result) ---
-st.sidebar.markdown("---")
-st.sidebar.subheader("詳細フィルター")
-
-# Actionフィルター
-all_actions = list(df_raw['Action'].unique())
-selected_actions = st.sidebar.multiselect("Action (売買)", all_actions, default=all_actions)
-
-# Resultフィルター
-all_results = list(df_raw['result'].fillna('Unset').unique())
-selected_results = st.sidebar.multiselect("Result (勝敗)", all_results, default=all_results)
-
-# フィルター適用
-if selected_actions:
-    df = df[df['Action'].isin(selected_actions)]
-if selected_results:
-    # NaN(未決済)の扱いを含めるため fillna してから比較
-    df = df[df['result'].fillna('Unset').isin(selected_results)]
-
-# --- ソート機能 ---
-sort_by = st.sidebar.selectbox("並び替え基準", options=['Date', 'profit_loss', 'entry_volatility'], index=0)
-sort_order = st.sidebar.radio("順序", options=['Desc (降順)', 'Asc (昇順)'], index=0)
-
-if sort_order == 'Desc (降順)':
-    df = df.sort_values(by=sort_by, ascending=False)
+    # カラム表示
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("💰 合計損益", f"{total_pl:,.0f}円", delta=f"{total_pl:,.0f}円")
+    col2.metric("📊 勝率", f"{win_rate:.1f}%", f"{wins}勝 {losses}敗")
+    col3.metric("📈 プロフィットファクター", f"{pf:.2f}")
+    col4.metric("🟢 平均勝ちトレード", f"+{avg_win_rate:.2f}%")
+    col5.metric("🔴 平均負けトレード", f"{avg_loss_rate:.2f}%")
 else:
-    df = df.sort_values(by=sort_by, ascending=True)
+    st.info("まだ決済されたトレードデータがありません。")
 
-
-# 戦績データのみ抽出 (WIN/LOSSがついているもの) for KPI
-df_results = df[df['result'].isin(['WIN', 'LOSS', 'DRAW'])]
+st.divider()
 
 # ==========================================
-# 3. KPI (重要指標) の表示
+# 3. 資産推移 & 利益率分布 (メインチャート)
 # ==========================================
-st.markdown("---")
+col_main, col_sub = st.columns([2, 1])
 
-# 計算
-total_trades = len(df_results)
-wins = len(df_results[df_results['result'] == 'WIN'])
-losses = len(df_results[df_results['result'] == 'LOSS'])
-win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
-total_profit = df_results['profit_loss'].sum()
-
-# 表示レイアウト
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.metric("抽出トレード数", f"{total_trades} 回", delta=f"勝: {wins} / 負: {losses}")
-
-with col2:
-    st.metric("勝率 (Win Rate)", f"{win_rate:.1f} %", 
-              delta_color="normal" if win_rate >= 50 else "inverse")
-
-with col3:
-    color = "normal" if total_profit >= 0 else "inverse"
-    st.metric("累積損益 (Total P/L)", f"{total_profit:,.0f} 円", delta=total_profit, delta_color=color)
-
-with col4:
-    # 直近のアクション
+with col_main:
+    st.subheader("📈 資産曲線 (Equity Curve)")
     if len(df) > 0:
-        last_action = df.iloc[0]['Action']
-        last_ticker = df.iloc[0]['Ticker']
-        last_date = df.iloc[0]['Date'].strftime('%Y-%m-%d')
-    else:
-        last_action, last_ticker, last_date = "-", "-", "-"
-        
-    st.metric("最新データ", f"{last_date}", f"{last_action} {last_ticker}")
-
-# ==========================================
-# 4. グラフ分析エリア
-# ==========================================
-col_left, col_right = st.columns([2, 1])
-
-with col_left:
-    st.subheader("📈 資産推移 (累積損益)")
-    if len(df_results) > 0:
-        # 日付順に並べ替え (グラフ用)
-        df_chart = df_results.sort_values('Date', ascending=True).copy()
-        df_chart['Cumulative PL'] = df_chart['profit_loss'].cumsum()
-        
-        fig_equity = px.line(df_chart, x='Date', y='Cumulative PL', markers=True,
-                             title="損益カーブ (右肩上がりが理想)")
+        fig_equity = px.line(df, x='Date', y='Equity', markers=True, 
+                             title="損益の積み上げ推移",
+                             labels={'Equity': '累積損益(円)', 'Date': '日付'})
+        # ゼロライン
         fig_equity.add_hline(y=0, line_dash="dash", line_color="gray")
         st.plotly_chart(fig_equity, use_container_width=True)
-    else:
-        st.info("戦績データがありません。")
 
-with col_right:
-    st.subheader("📊 勝敗比率")
+with col_sub:
+    st.subheader("📊 利益率の分布")
     if len(df_results) > 0:
-        fig_pie = px.pie(df_results, names='result', 
-                         color='result',
-                         color_discrete_map={'WIN':'#00cc96', 'LOSS':'#EF553B', 'DRAW':'gray'},
-                         title="WIN / LOSS / DRAW")
+        # ヒストグラム
+        fig_hist = px.histogram(df_results, x="profit_rate", nbins=20,
+                                color="result",
+                                color_discrete_map={'WIN':'#00cc96', 'LOSS':'#EF553B'},
+                                title="1トレードあたりの利益率(%)",
+                                labels={'profit_rate': '利益率(%)'})
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+# ==========================================
+# 4. 詳細分析 (円グラフ等)
+# ==========================================
+col_left, col_right = st.columns(2)
+
+with col_left:
+    st.subheader("🛑 決済理由の内訳 (Exit Reason)")
+    if 'stop_loss_reason' in df_results.columns:
+        # 空白やNaNを 'Unknown' に置換
+        df_results['stop_loss_reason'] = df_results['stop_loss_reason'].fillna('Unknown')
+        reason_counts = df_results['stop_loss_reason'].value_counts().reset_index()
+        reason_counts.columns = ['reason', 'count']
+        
+        fig_pie = px.pie(reason_counts, names='reason', values='count',
+                         title="どのような理由で決済されたか",
+                         hole=0.4)
         st.plotly_chart(fig_pie, use_container_width=True)
     else:
-        st.info("データ不足")
+        st.info("決済理由データがありません。")
+
+with col_right:
+    st.subheader("🏆 銘柄別 パフォーマンス")
+    if len(df_results) > 0:
+        ticker_perf = df_results.groupby('Ticker')['profit_loss'].sum().reset_index()
+        ticker_perf = ticker_perf.sort_values('profit_loss', ascending=False).head(10) # Top 10
+        
+        fig_bar = px.bar(ticker_perf, x='Ticker', y='profit_loss',
+                         color='profit_loss',
+                         color_continuous_scale=['red', 'gray', 'green'],
+                         title="損益貢献度ランキング (Top 10)")
+        st.plotly_chart(fig_bar, use_container_width=True)
 
 # ==========================================
-# 5. 銘柄別パフォーマンス
+# 5. 直近のトレード履歴 (データテーブル)
 # ==========================================
-st.subheader("🏆 銘柄別 損益ランキング")
-if len(df_results) > 0:
-    ticker_perf = df_results.groupby('Ticker')['profit_loss'].sum().reset_index()
-    ticker_perf = ticker_perf.sort_values('profit_loss', ascending=False)
+st.subheader("📝 直近のトレード履歴")
+if len(df) > 0:
+    # 表示するカラムを絞る
+    display_cols = ['Date', 'Ticker', 'Action', 'result', 'Price', 'profit_loss', 'profit_rate', 'Reason', 'stop_loss_reason']
+    # 存在しないカラムは除外
+    display_cols = [c for c in display_cols if c in df.columns]
     
-    # 上位・下位を見やすくするために色分け
-    fig_bar = px.bar(ticker_perf, x='Ticker', y='profit_loss',
-                     color='profit_loss',
-                     color_continuous_scale=['red', 'gray', 'green'],
-                     title="AIが得意な銘柄 vs 苦手な銘柄")
-    st.plotly_chart(fig_bar, use_container_width=True)
+    # 最新順に並べ替え
+    df_display = df.sort_values('Date', ascending=False)
+    
+    # 色付け用のスタイル関数
+    def highlight_result(val):
+        color = 'red' if val == 'LOSS' else 'green' if val == 'WIN' else 'black'
+        return f'color: {color}; font-weight: bold'
 
-# ==========================================
-# 6. 生データ (フィルタリング結果)
-# ==========================================
-st.subheader(f"📝 取引履歴 (全{len(df)}件)")
-st.dataframe(df, use_container_width=True)
-
-# フッター
-st.markdown("---")
-st.caption("AI Market Monitor System - Sniper Edition v2.1")
+    st.dataframe(
+        df_display[display_cols].style.map(highlight_result, subset=['result'])
+        .format({'profit_loss': '{:+.0f}', 'profit_rate': '{:+.2f}%', 'Price': '{:.0f}'}),
+        use_container_width=True
+    )
