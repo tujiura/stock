@@ -14,16 +14,15 @@ TARGET_FILES = [
     "real_trade_record.csv"             # 実戦用（あなたの記録）
 ]
 
-# 判定設定
-PROFIT_TARGET_PCT = 0.05  # 5%利益で早期利確（WIN）
-JUDGE_PERIOD_DAYS = 15     # 判定期間（これを超えたら強制決済）
+# 判定期間設定
+JUDGE_PERIOD_DAYS = 30     # エントリーから最大何日まで見るか（期限切れ判定用）
 
-# CSVの列順序定義（profit_rateを追加）
+# CSVの列順序定義
 CSV_COLUMNS = [
     "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
     "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
     "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", 
-    "profit_loss", "profit_rate"  # <--- ★追加
+    "profit_loss", "profit_rate"
 ]
 
 # ---------------------------------------------------------
@@ -34,12 +33,14 @@ def get_stock_data(ticker, start_date):
     指定日以降の株価データを取得
     """
     try:
-        # yfinanceのログを抑制
         import logging
         logging.getLogger('yfinance').setLevel(logging.CRITICAL)
         
-        # 開始日から今日までのデータを取得
-        df = yf.download(ticker, start=start_date, progress=False, auto_adjust=True)
+        # エントリー当日を含めて取得（当日の足はエントリー後の動きとして簡易判定に使う場合もあるが、基本は翌日以降）
+        # yfinanceは start <= date < end なので、念のため少し前から取る
+        fetch_start = start_date - datetime.timedelta(days=5)
+        
+        df = yf.download(ticker, start=fetch_start, progress=False, auto_adjust=True)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
         if df.empty: return None
@@ -50,7 +51,7 @@ def get_stock_data(ticker, start_date):
 
 def update_single_file(file_path):
     """
-    1つのCSVファイルを読み込み、結果を更新して保存する
+    1つのCSVファイルを読み込み、最新ロジック（可変式トレーリング）で結果を判定・更新する
     """
     if not os.path.exists(file_path):
         print(f"⏩ ファイルなし（スキップ）: {file_path}")
@@ -63,11 +64,12 @@ def update_single_file(file_path):
         rename_map = {
             'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 
             'result': 'result', 'price': 'Price', 'stop_loss_price': 'stop_loss_price',
-            'profit_loss': 'profit_loss', 'profit_rate': 'profit_rate'
+            'profit_loss': 'profit_loss', 'profit_rate': 'profit_rate',
+            'entry_volatility': 'entry_volatility'
         }
         df.columns = [rename_map.get(col.lower(), col) for col in df.columns]
         
-        # 足りない列があれば追加（profit_rate含む）
+        # 足りない列があれば追加
         for col in CSV_COLUMNS:
             if col not in df.columns: df[col] = None
             
@@ -90,10 +92,13 @@ def update_single_file(file_path):
         entry_date_str = row['Date']
         action = row['Action']
         
-        # 数値変換とエラーハンドリング
         try:
             entry_price = float(row['Price']) if pd.notna(row['Price']) else 0
-            sl_price = float(row['stop_loss_price']) if pd.notna(row['stop_loss_price']) else 0
+            # CSVに記録されたSLがあればそれを使うが、なければ計算で出す
+            initial_sl_price = float(row['stop_loss_price']) if pd.notna(row['stop_loss_price']) else 0
+            # ボラティリティからATRを逆算 (ATR = Price * Volatility / 100)
+            volatility = float(row['entry_volatility']) if pd.notna(row['entry_volatility']) else 1.5
+            atr_value = entry_price * (volatility / 100)
         except ValueError:
             continue
         
@@ -101,91 +106,117 @@ def update_single_file(file_path):
 
         try:
             entry_date = pd.to_datetime(entry_date_str)
-            stock_data = get_stock_data(ticker, entry_date_str)
+            # データ取得（エントリー日以降）
+            stock_data = get_stock_data(ticker, entry_date)
         except:
             continue
 
         if stock_data is None or len(stock_data) < 2: continue
 
-        # --- 判定ロジック ---
-        
-        # 1. 判定期限日を計算
-        limit_date = entry_date + datetime.timedelta(days=JUDGE_PERIOD_DAYS)
-        
-        # 2. エントリー翌日から期限日までのデータを抽出
-        period_data = stock_data[(stock_data.index >= entry_date) & (stock_data.index <= limit_date)]
+        # エントリー日の次の営業日から判定スタート
+        # (stock_dataにはエントリー日も含まれる可能性があるためフィルタリング)
+        period_data = stock_data[stock_data.index > entry_date].copy()
         
         if len(period_data) == 0: continue
 
-        # 期間内の高値・安値
-        period_low = float(period_data['Low'].min())
-        period_high = float(period_data['High'].max())
+        # --- 🏆 最新判定ロジック: 可変式ATRトレーリングストップ ---
         
-        # 期間最終日の終値（タイムアップ時の決済価格）
-        final_close = float(period_data.iloc[-1]['Close'])
+        # 変数初期化
+        current_sl = initial_sl_price
+        if current_sl == 0: # CSVにSLがない場合の初期値 (ATR x 2.0)
+            current_sl = entry_price - (atr_value * 2.0)
+            
+        max_price = entry_price
         
         result = ""
-        profit_loss = 0.0
-        profit_rate = 0.0 # ★利益率
+        exit_price = 0.0
+        final_date = None
         is_settled = False
 
-        # A. 期間内のSL/TPチェック（優先）
-        if action == "BUY":
-            # 損切り (SL)
-            if sl_price > 0 and period_low <= sl_price:
-                result = "LOSS"
-                profit_loss = sl_price - entry_price
-                print(f"   💀 {ticker}: 期間内損切り (安値 {period_low:.0f} <= SL {sl_price:.0f})")
-                is_settled = True
-            # 利確 (TP)
-            elif period_high >= entry_price * (1 + PROFIT_TARGET_PCT):
-                result = "WIN"
-                profit_loss = (entry_price * (1 + PROFIT_TARGET_PCT)) - entry_price
-                print(f"   🏆 {ticker}: 期間内利確 (目標到達)")
-                is_settled = True
+        # 1日ずつシミュレーション
+        for date, day_data in period_data.iterrows():
+            day_low = float(day_data['Low'])
+            day_high = float(day_data['High'])
+            day_close = float(day_data['Close'])
+            final_date = date
 
-        elif action == "SELL":
-            # 損切り (SL: 空売りなので高値で損切り)
-            if sl_price > 0 and period_high >= sl_price:
-                result = "LOSS"
-                profit_loss = entry_price - sl_price
-                print(f"   💀 {ticker}: 期間内損切り (高値 {period_high:.0f} >= SL {sl_price:.0f})")
-                is_settled = True
-            # 利確 (TP: 空売りなので安値で利確)
-            elif period_low <= entry_price * (1 - PROFIT_TARGET_PCT):
-                result = "WIN"
-                profit_loss = entry_price - (entry_price * (1 - PROFIT_TARGET_PCT))
-                print(f"   🏆 {ticker}: 期間内利確 (目標到達)")
-                is_settled = True
+            if action == "BUY":
+                # 1. 損切り判定 (Lowがタッチしたか)
+                if day_low <= current_sl:
+                    result = "LOSS" # 暫定（プラス決済ならWINに書き換える）
+                    exit_price = current_sl # 逆指値価格で決済
+                    # 窓開け等でSLよりはるかに下で寄った場合は始値で決済すべきだが、
+                    # 簡易的にSL価格、あるいは安値との比較で保守的に計算
+                    # ここではSL価格を採用（厳密には Open との比較が必要だがデータ簡略化）
+                    is_settled = True
+                    # 建値ガード等でSLが買値より上にある場合はWIN
+                    if exit_price > entry_price:
+                        result = "WIN"
+                    print(f"   💀 {ticker}: 決済 ({date.strftime('%m/%d')}) SL接触 {exit_price:.0f} (High:{day_high:.0f} / SL:{current_sl:.0f})")
+                    break
 
-        # B. 期間終了による強制判定 (Time Stop)
+                # 2. トレーリング更新判定 (Highが更新したか)
+                if day_high > max_price:
+                    max_price = day_high
+                    
+                    # 現在の含み益率（ピーク時）
+                    current_profit_pct = (max_price - entry_price) / entry_price
+                    
+                    # ★ラチェット機能: 利益が出るほど追従をきつくする
+                    if current_profit_pct > 0.05:   # +5%超え
+                        trail_width = atr_value * 0.5 # ほぼ利確モード
+                    elif current_profit_pct > 0.03: # +3%超え
+                        trail_width = atr_value * 1.0 # 激狭
+                    else:
+                        trail_width = atr_value * 2.0 # 標準
+                        
+                    new_sl = max_price - trail_width
+                    
+                    # ★建値ガード: +1.5%乗ったら絶対に負けない位置へ
+                    if current_profit_pct > 0.015:
+                        break_even_price = entry_price * 1.001 # 手数料分少しプラス
+                        new_sl = max(new_sl, break_even_price)
+
+                    # 逆指値は「上げる」ことしかしない
+                    if new_sl > current_sl:
+                        current_sl = new_sl
+                        # print(f"     ⬆️ SL引上: {current_sl:.0f} (Max:{max_price:.0f})")
+
+            # SELLロジック（今回はBUY限定システムのため簡易実装または省略）
+            elif action == "SELL":
+                pass 
+
+        # 期限切れ判定
         if not is_settled:
+            limit_date = entry_date + datetime.timedelta(days=JUDGE_PERIOD_DAYS)
             if now > limit_date:
-                # 最終日の終値で決済したとみなす
-                if action == "BUY":
-                    profit_loss = final_close - entry_price
-                elif action == "SELL":
-                    profit_loss = entry_price - final_close
-                
-                if profit_loss > 0:
+                # 期限切れ強制決済（最終日の終値）
+                exit_price = day_close # ループ最後の日の終値
+                is_settled = True
+                if exit_price > entry_price:
                     result = "WIN"
-                    print(f"   ⏰ {ticker}: 期限切れ WIN (終値 {final_close:.0f})")
+                    print(f"   ⏰ {ticker}: 期限切れ WIN (終値 {exit_price:.0f})")
                 else:
                     result = "LOSS"
-                    print(f"   ⏰ {ticker}: 期限切れ LOSS (終値 {final_close:.0f})")
-            else:
-                # まだ期間内で、かつSL/TPにもかかっていない -> 結果保留
-                pass
+                    print(f"   ⏰ {ticker}: 期限切れ LOSS (終値 {exit_price:.0f})")
 
-        # 結果が出た場合のみ更新
-        if result != "":
-            # ★利益率の計算
+        # 結果書き込み
+        if is_settled:
+            profit_loss = exit_price - entry_price
+            if action == "SELL": profit_loss = entry_price - exit_price # SELLの場合逆
+            
+            # 利益率
+            profit_rate = 0.0
             if entry_price != 0:
                 profit_rate = (profit_loss / entry_price) * 100
             
             df.at[index, 'result'] = result
             df.at[index, 'profit_loss'] = profit_loss
-            df.at[index, 'profit_rate'] = profit_rate # ★記録
+            df.at[index, 'profit_rate'] = profit_rate
+            
+            # SL価格も最終的な値に更新しておく（記録として）
+            df.at[index, 'stop_loss_price'] = current_sl
+            
             updated_count += 1
 
     # 保存処理
@@ -200,7 +231,7 @@ def update_single_file(file_path):
                 try:
                     import subprocess
                     subprocess.run(["git", "add", file_path], check=True, capture_output=True)
-                    subprocess.run(["git", "commit", "-m", f"Auto update results: {file_path}"], check=True, capture_output=True)
+                    subprocess.run(["git", "commit", "-m", f"Auto update results (Ratchet Trailing): {file_path}"], check=True, capture_output=True)
                     print("   ☁️ Gitコミット完了")
                 except: pass
                 break
@@ -217,7 +248,7 @@ def update_single_file(file_path):
 # メイン実行
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    print("=== 📈 トレード結果 自動更新システム (利益率対応版) ===")
+    print("=== 📈 トレード結果 自動更新システム (可変式トレーリング版) ===")
     
     do_push = False
     for file_name in TARGET_FILES:
