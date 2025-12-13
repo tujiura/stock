@@ -22,7 +22,6 @@ import logging
 def auto_git_push(commit_message="Auto update trade memory"):
     """
     学習結果(CSV)を自動でGitHubにプッシュする
-    (競合回避のための pull --rebase 機能付き)
     """
     try:
         print("\n☁️ GitHubへ同期中...")
@@ -62,10 +61,11 @@ genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.0-flash' 
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
-TRAINING_ROUNDS = 1000 
+TRAINING_ROUNDS = 3000 
 TIMEFRAME = "1d" 
 CBR_NEIGHBORS_COUNT = 15 
 MIN_VOLATILITY = 1.0 
+TRADE_BUDGET = 1000000 # ★1トレードあたりの予算（100万円）
 
 # 練習用銘柄リスト
 TRAINING_LIST = [
@@ -155,7 +155,7 @@ def calculate_metrics_enhanced(df, idx):
     }
 
 # ==========================================
-# 2. CBRメモリシステム (自動修復・スキーマ更新付き)
+# 2. CBRメモリシステム
 # ==========================================
 class CaseBasedMemory:
     def __init__(self, csv_path):
@@ -164,13 +164,11 @@ class CaseBasedMemory:
         self.knn = None
         self.df = pd.DataFrame()
         self.feature_cols = ['sma25_dev', 'trend_momentum', 'macd_power', 'entry_volatility', 'rsi_9']
-        
-        # ★追加: CSVのカラム定義 (profit_rateを追加)
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
             "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", "rsi_9", 
-            "profit_loss", "profit_rate"  # <--- 新しいカラム
+            "profit_loss", "profit_rate"
         ]
         self.load_and_train()
 
@@ -179,46 +177,25 @@ class CaseBasedMemory:
         
         try:
             self.df = pd.read_csv(self.csv_path)
-            
-            # --- スキーマ（列）の自動アップグレード ---
-            # 既存のCSVに新しい列(profit_rate)がない場合、追加して保存し直す
             missing_cols = [col for col in self.csv_columns if col not in self.df.columns]
             if missing_cols:
-                # print(f"🔧 CSVスキーマ更新: {missing_cols} を追加します...")
-                for col in missing_cols:
-                    self.df[col] = 0.0 # 初期値
-                # 列順序を整えて上書き保存
+                for col in missing_cols: self.df[col] = 0.0 
                 self.df = self.df[self.csv_columns]
                 self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
-                # print("✅ CSV更新完了")
-                
         except Exception as e:
             print(f"⚠️ CSV読込エラー: {e}")
-            print("🔄 自動修復モードで再試行...")
             try:
                 self.df = pd.read_csv(self.csv_path, on_bad_lines='skip')
-                
-                # 修復時にもスキーマ更新を試みる
                 missing_cols = [col for col in self.csv_columns if col not in self.df.columns]
                 for col in missing_cols: self.df[col] = 0.0
-                
                 self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
-                print(f"✅ 修復完了 (有効データ: {len(self.df)}件)")
-            except Exception as e2:
-                print(f"❌ 修復失敗: {e2}")
-                return
+            except Exception: return
 
         try:
-            rename_map = {
-                'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 
-                'reason': 'Reason', 'timeframe': 'Timeframe', 
-                'result': 'result', 'profit_loss': 'profit_loss',
-                'confidence': 'Confidence'
-            }
+            rename_map = {'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 'result': 'result', 'profit_loss': 'profit_loss'}
             self.df.columns = [rename_map.get(col.lower(), col) for col in self.df.columns]
             
             valid_df = self.df[self.df['result'].isin(['WIN', 'LOSS'])].copy()
-            
             if len(valid_df) < 5: return
 
             for col in self.feature_cols:
@@ -228,7 +205,6 @@ class CaseBasedMemory:
             self.features_normalized = self.scaler.fit_transform(features)
             
             self.valid_df_for_knn = valid_df 
-            
             global CBR_NEIGHBORS_COUNT
             self.knn = NearestNeighbors(n_neighbors=min(CBR_NEIGHBORS_COUNT, len(valid_df)), metric='euclidean')
             self.knn.fit(self.features_normalized)
@@ -238,19 +214,13 @@ class CaseBasedMemory:
 
     def search_similar_cases(self, current_metrics):
         if self.knn is None: return "（学習データ不足）"
-
-        metrics_vec = []
-        for col in self.feature_cols:
-            metrics_vec.append(current_metrics.get(col, 0))
-            
+        metrics_vec = [current_metrics.get(col, 0) for col in self.feature_cols]
         input_df = pd.DataFrame([metrics_vec], columns=self.feature_cols)
         scaled_vec = self.scaler.transform(input_df)
         distances, indices = self.knn.kneighbors(scaled_vec)
         
         text = f"【過去の類似局面 ({len(indices[0])}件)】\n"
-        win_c = 0
-        loss_c = 0
-        
+        win_c = 0; loss_c = 0
         for idx in indices[0]:
             row = self.valid_df_for_knn.iloc[idx]
             res = str(row.get('result', ''))
@@ -258,12 +228,10 @@ class CaseBasedMemory:
             if res == 'LOSS': loss_c += 1
             icon = "⭕" if res == 'WIN' else "❌"
             text += f"- {row.get('Date')} {row.get('Ticker')}: {icon} (MOM:{row.get('trend_momentum',0):.1f})\n"
-            
         text += f"-> 類似データ傾向: 勝ち{win_c} / 負け{loss_c}\n"
         return text
 
     def save_experience(self, data_dict):
-        # データフレーム作成時にカラム順序を強制
         new_df = pd.DataFrame([data_dict])
         for col in self.csv_columns:
             if col not in new_df.columns: new_df[col] = None
@@ -276,14 +244,11 @@ class CaseBasedMemory:
                     new_df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
                 else:
                     new_df.to_csv(self.csv_path, mode='a', header=False, index=False, encoding='utf-8-sig')
-                
                 self.load_and_train() 
                 return
-            except PermissionError:
-                time.sleep(2)
+            except PermissionError: time.sleep(2)
             except Exception as e:
-                print(f"❌ 保存エラー: {e}")
-                break
+                print(f"❌ 保存エラー: {e}"); break
 
 # ==========================================
 # 3. AIスパーリング (ATRトレーリングストップ版)
@@ -303,13 +268,14 @@ def create_chart_image(df, ticker_name):
     return buf.getvalue()
 
 def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
-    # --- 🛡️ 鉄の掟フィルター ---
+    # --- 🛡️ 鉄の掟フィルター (厳格化版) ---
+    # ボラティリティ閾値を 2.5 -> 2.0 に強化
+    if metrics['entry_volatility'] > 2.3:
+        return {"action": "HOLD", "confidence": 0, "reason": f"【鉄の掟】ボラティリティ過大 ({metrics['entry_volatility']:.2f}%)", "stop_loss_price": 0}
     if metrics['trend_momentum'] < 0:
         return {"action": "HOLD", "confidence": 0, "reason": "【鉄の掟】下降トレンド中 (Momentum < 0)", "stop_loss_price": 0}
     if metrics['sma25_dev'] < 0:
         return {"action": "HOLD", "confidence": 0, "reason": "【鉄の掟】SMA25割れ (戻り待ち)", "stop_loss_price": 0}
-    if metrics['entry_volatility'] > 2.5:
-        return {"action": "HOLD", "confidence": 0, "reason": f"【鉄の掟】ボラティリティ過大 ({metrics['entry_volatility']:.2f}%)", "stop_loss_price": 0}
 
     prompt = f"""
 ### CONTEXT
@@ -317,15 +283,14 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
 【テクニカル指標】
 - トレンド勢い: {metrics['trend_momentum']:.2f} (プラス必須)
 - SMA25乖離率: {metrics['sma25_dev']:.2f}% (プラス圏)
-- ボラティリティ: {metrics['entry_volatility']:.2f}% (2.5%以下推奨)
+- ボラティリティ: {metrics['entry_volatility']:.2f}% (2.0%以下推奨)
 - RSI(9): {metrics['rsi_9']:.1f}
 - ATR: {metrics['atr_value']:.1f}
-
-【ニュース】
+### PAST SIMILAR CASES
 {similar_cases_text}
 ### TASK
-あなたはデータ至上主義のAIトレーダーです。
-「感情」や「期待」を排除し、以下の**統計的勝率が高い条件**に合致する場合のみ BUY を選択してください。
+「資産防衛型AI」として「買い (BUY)」か「様子見 (HOLD)」のみ判定せよ。空売り不可。
+売却判断はATRトレーリングストップに一任するため、ここでは「エントリーの優位性」のみを審査する。
 
 ### RULES (統計的優位性に基づく鉄の掟)
 
@@ -359,18 +324,9 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
   "reason": "理由(100文字以内)"
 }}
 """
-    safety_settings = {
-        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-    }
-
+    safety_settings = {HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
     try:
-        response = model.generate_content(
-            [prompt, {'mime_type': 'image/png', 'data': chart_bytes}], 
-            safety_settings=safety_settings
-        )
+        response = model.generate_content([prompt, {'mime_type': 'image/png', 'data': chart_bytes}], safety_settings=safety_settings)
         text = response.text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match: text = match.group(0)
@@ -379,16 +335,15 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
         return {"action": "HOLD", "reason": f"Error: {e}", "confidence": 0, "stop_loss_price": 0}
 
 # ==========================================
-# 4. メイン実行 (ATRトレーリングストップ版)
+# 4. メイン実行 (定額投資シミュレーション版)
 # ==========================================
 def main():
-    print(f"=== AI強化合宿（ATRトレーリングストップ実装版 + 利益率） ===")
+    print(f"=== AI強化合宿 (勝ち逃げ特化: 即時追従 & 建値ガード) ===")
+    print(f"設定: 資金 {TRADE_BUDGET:,}円 | トレーリング開始:即時(ATR x2.0) -> +3%(x1.0) -> +5%(x0.5)")
     
     memory_system = CaseBasedMemory(LOG_FILE) 
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
-    except Exception as e: 
-        print(f"Model Init Error: {e}")
-        return
+    except Exception as e: print(f"Model Init Error: {e}"); return
 
     processed_data = {}
     print(f"Downloading data...")
@@ -398,16 +353,11 @@ def main():
         df = calculate_technical_indicators(df)
         processed_data[t] = df
 
-    if not processed_data:
-        print("データ不足のため終了します。")
-        return
+    if not processed_data: print("データ不足のため終了します。"); return
 
-    win_count = 0
-    loss_count = 0
-    
-    # ★集計用変数の初期化
-    total_profit_loss = 0.0
-    total_invested_amount = 0.0
+    win_count = 0; loss_count = 0
+    total_profit_loss = 0.0 
+    total_invested_count = 0 
     
     print(f"\n🥊 トレーニング開始 ({TRAINING_ROUNDS}ラウンド)\n")
     
@@ -425,25 +375,25 @@ def main():
         
         decision = ai_decision_maker(model_instance, chart_bytes, metrics, cbr_text, ticker)
         action = decision.get('action', 'HOLD')
-        
-        # フィルターによる強制HOLDスキップ
-        if action == "HOLD" and "鉄の掟" in decision.get('reason', ''):
-            continue
+        if action == "HOLD" and "鉄の掟" in decision.get('reason', ''): continue
 
         conf = decision.get('confidence', 0)
         if action == "BUY" :
-            action_display = "BUY 🔴" 
-            print(f"Round {i:03}: {ticker} ({current_date_str}) -> {action_display} (自信:{conf}%)")
+            print(f"Round {i:03}: {ticker} ({current_date_str}) -> BUY 🔴 (自信:{conf}%)")
 
-        result = "DRAW"
-        profit_loss = 0.0
-        profit_rate = 0.0 # 利益率初期化
+        result = "DRAW"; profit_loss = 0.0; profit_rate = 0.0
         
         if action == "BUY":
-            # === ★ATRトレーリングストップ ロジック ===
+            # --- 資金管理シミュレーション ---
             entry_price = float(metrics['price'])
-            current_atr = float(metrics['atr_value']) 
+            shares = int(TRADE_BUDGET // entry_price)
+            if shares < 1: shares = 1
+            invested_capital = shares * entry_price
 
+            # ATRトレーリングストップ (★勝ち逃げ仕様)
+            current_atr = float(metrics['atr_value']) 
+            
+            # 初期設定: ATR x 2.0 (標準)
             current_stop_loss = entry_price - (current_atr * 2.0)
             max_price = entry_price 
 
@@ -451,81 +401,84 @@ def main():
             future_lows = df['Low'].iloc[target_idx+1 : target_idx+6]
             future_highs = df['High'].iloc[target_idx+1 : target_idx+6]
             
-            is_win = False
-            is_loss = False
-            
+            is_win = False; is_loss = False
+            final_exit_price = entry_price
+
             if len(future_prices) > 0:
                 for j in range(len(future_prices)):
-                    p_low = future_lows.iloc[j]
-                    p_high = future_highs.iloc[j]
+                    p_low = future_lows.iloc[j]; p_high = future_highs.iloc[j]
                     
+                    # 損切り判定
                     if p_low <= current_stop_loss:
                         is_loss = True
-                        profit_loss = current_stop_loss - entry_price
+                        final_exit_price = current_stop_loss 
                         break
                     
+                    # トレーリング判定 (★即時追従 & 鬼の利食い)
                     if p_high > max_price:
                         max_price = p_high
-                        new_stop_loss = max_price - (current_atr * 2.0)
+                        current_profit_pct = (max_price - entry_price) / entry_price
+                        
+                        # ラチェット機能: 利益が出るほど絞める
+                        if current_profit_pct > 0.05: # +5%超え
+                            trail_width = current_atr * 0.5 # ほぼ利確
+                        elif current_profit_pct > 0.03: # +3%超え
+                            trail_width = current_atr * 1.0 # 激狭
+                        else:
+                            trail_width = current_atr * 2.0 # 標準 (最初から追従)
+                            
+                        new_stop_loss = max_price - trail_width
+                        
+                        # ★建値ガード: +1.5%乗ったら絶対に負けない
+                        if current_profit_pct > 0.015:
+                             break_even_price = entry_price + (entry_price * 0.001) # 微益撤退ライン
+                             new_stop_loss = max(new_stop_loss, break_even_price)
+
                         if new_stop_loss > current_stop_loss:
                             current_stop_loss = new_stop_loss
+                
+                if not is_loss:
+                    final_exit_price = future_prices.iloc[-1] 
 
-                if is_loss:
-                    result = "LOSS" if profit_loss < 0 else "WIN"
-                else:
-                    final_p = future_prices.iloc[-1]
-                    profit_loss = final_p - entry_price
-                    result = "WIN" if profit_loss > 0 else "LOSS"
+                # 損益計算
+                profit_loss = (final_exit_price - entry_price) * shares
+                profit_rate = ((final_exit_price - entry_price) / entry_price) * 100
                 
-                # ★利益率(%)計算
-                if entry_price > 0:
-                    profit_rate = (profit_loss / entry_price) * 100
+                if profit_loss > 0: result = "WIN"; win_count += 1
+                elif profit_loss < 0: result = "LOSS"; loss_count += 1
                 
-                # ★集計用
                 total_profit_loss += profit_loss
-                total_invested_amount += entry_price
+                total_invested_count += 1
 
-            else:
-                result = "Unknown"
+            else: result = "Unknown"
 
             icon = "🏆" if result == "WIN" else "💀" if result == "LOSS" else "➖"
-            
-            # 結果表示に利益率を追加
-            print(f"   結果: {icon} {result} (PL: {profit_loss:.1f} / {profit_rate:+.2f}%) > {decision.get('reason')}")
-            
-            if result == "WIN": win_count += 1
-            if result == "LOSS": loss_count += 1
+            print(f"   結果: {icon} {result} (PL: {profit_loss:+.0f}円 / {profit_rate:+.2f}%) 株数:{shares} > {decision.get('reason')}")
             
             save_data = {
                 'Date': current_date_str, 'Ticker': ticker, 'Timeframe': TIMEFRAME, 
                 'Action': action, 'result': result, 
                 'Reason': decision.get('reason', 'None'),
                 'Confidence': conf,
-                'stop_loss_price': current_stop_loss,
-                'stop_loss_reason': "ATR_Trailing_Stop", 
-                'Price': metrics['price'],
-                'sma25_dev': metrics['sma25_dev'], 
-                'trend_momentum': metrics['trend_momentum'],
-                'macd_power': metrics['macd_power'],
-                'entry_volatility': metrics['entry_volatility'],
-                'profit_loss': profit_loss,
-                'profit_rate': profit_rate 
+                'stop_loss_price': current_stop_loss, 'stop_loss_reason': "Aggressive_Trailing", 
+                'Price': metrics['price'], 'sma25_dev': metrics['sma25_dev'], 
+                'trend_momentum': metrics['trend_momentum'], 'macd_power': metrics['macd_power'],
+                'entry_volatility': metrics['entry_volatility'], 'rsi_9': metrics['rsi_9'], 
+                'profit_loss': profit_loss, 'profit_rate': profit_rate
             }
             memory_system.save_experience(save_data)
-        
         time.sleep(1)
 
     print(f"\n=== 合宿終了 ===")
     print(f"戦績 (BUY): {win_count}勝 {loss_count}敗")
+    print(f"シミュレーション設定: {TRADE_BUDGET:,}円/トレード")
+    print(f"合計損益: {total_profit_loss:+.0f}円")
     
-    # ★合計損益とトータル利益率の表示
-    total_return_rate = 0.0
-    if total_invested_amount > 0:
-        total_return_rate = (total_profit_loss / total_invested_amount) * 100
-        
-    print(f"合計損益: {total_profit_loss:+.1f}円")
-    print(f"トータル利益率: {total_return_rate:+.2f}%")
+    total_invested_sum = total_invested_count * TRADE_BUDGET
+    if total_invested_sum > 0:
+        total_roi = (total_profit_loss / total_invested_sum) * 100
+        print(f"総収益率 (ROI): {total_roi:+.2f}%")
 
 if __name__ == "__main__":
     main()
-    auto_git_push(commit_message="Training Camp Result Update (Added Total Profit Display)")
+    auto_git_push(commit_message="Training Camp: Aggressive Trailing & Break-Even")

@@ -168,7 +168,7 @@ def get_weekly_trend(ticker):
     except: return "不明"
 
 # ==========================================
-# 2. 指標計算 (ATR追加版)
+# 2. 指標計算
 # ==========================================
 def calculate_metrics_enhanced(df):
     if len(df) < 26: return None
@@ -212,7 +212,7 @@ def calculate_metrics_enhanced(df):
     }
 
 # ==========================================
-# 3. CBRメモリシステム (スキーマ自動更新機能付き)
+# 3. CBRメモリシステム
 # ==========================================
 class CaseBasedMemory:
     def __init__(self, csv_path):
@@ -222,12 +222,11 @@ class CaseBasedMemory:
         self.df = pd.DataFrame()
         self.feature_cols = ['sma25_dev', 'trend_momentum', 'macd_power', 'entry_volatility', 'rsi_9']
         
-        # ★追加: CSVのカラム定義 (profit_rate対応)
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
             "sma25_dev", "trend_momentum", "macd_power", "entry_volatility", "rsi_9", 
-            "profit_loss", "profit_rate"  # <--- 本番環境でもこの列定義を使用
+            "profit_loss", "profit_rate" 
         ]
         self.load_and_train()
 
@@ -237,33 +236,24 @@ class CaseBasedMemory:
         try:
             self.df = pd.read_csv(self.csv_path)
             
-            # --- スキーマ（列）の自動アップグレード ---
-            # 既存のCSVに新しい列(profit_rate)がない場合、追加して保存し直す
+            # --- スキーマ自動更新 ---
             missing_cols = [col for col in self.csv_columns if col not in self.df.columns]
             if missing_cols:
-                print(f"🔧 CSVスキーマ更新: {missing_cols} を追加します...")
-                for col in missing_cols:
-                    self.df[col] = 0.0 # 初期値
+                for col in missing_cols: self.df[col] = 0.0
                 self.df = self.df[self.csv_columns]
                 self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
 
         except Exception as e:
             print(f"⚠️ CSV読込エラー: {e}")
-            print("🔄 自動修復モードで再試行...")
             try:
                 self.df = pd.read_csv(self.csv_path, on_bad_lines='skip')
-                # 修復時にもスキーマ更新を試みる
                 missing_cols = [col for col in self.csv_columns if col not in self.df.columns]
                 for col in missing_cols: self.df[col] = 0.0
-                
                 self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
-                print(f"✅ 修復完了 (有効データ: {len(self.df)}件)")
-            except Exception as e2:
-                print(f"❌ 修復失敗: {e2}")
-                return
+            except Exception: return
 
         try:
-            rename_map = {'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 'result': 'result', 'profit_loss': 'profit_loss'}
+            rename_map = {'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 'result': 'result'}
             self.df.columns = [rename_map.get(col.lower(), col) for col in self.df.columns]
             
             valid_df = self.df[self.df['result'].isin(['WIN', 'LOSS'])].copy()
@@ -276,6 +266,7 @@ class CaseBasedMemory:
             self.features_normalized = self.scaler.fit_transform(features)
             
             self.valid_df_for_knn = valid_df 
+            global CBR_NEIGHBORS_COUNT
             self.knn = NearestNeighbors(n_neighbors=min(CBR_NEIGHBORS_COUNT, len(valid_df)), metric='euclidean')
             self.knn.fit(self.features_normalized)
             print(f"Memory Loaded: {len(valid_df)} valid records.")
@@ -297,12 +288,12 @@ class CaseBasedMemory:
             if res == 'WIN': win_c += 1
             if res == 'LOSS': loss_c += 1
             icon = "⭕" if res=='WIN' else "❌"
-            text += f"- {row.get('Date')} {row.get('Ticker')}: {icon}\n"
+            text += f"- {row.get('Date')} {row.get('Ticker')}: {icon} (MOM:{row.get('trend_momentum',0):.1f})\n"
         text += f"-> 傾向: 勝ち{win_c} / 負け{loss_c}\n"
         return text
 
 # ==========================================
-# 4. AI判定 (統合版)
+# 4. AI判定
 # ==========================================
 def create_chart_image(df, name):
     data = df.tail(100).copy()
@@ -318,13 +309,13 @@ def create_chart_image(df, name):
     return {"mime_type": "image/png", "data": buf.getvalue()}
 
 def ai_decision_maker(model, chart_bytes, metrics, cbr_text, macro, news, fundamentals, weekly, ticker):
-    # 鉄の掟フィルター
+    # 鉄の掟フィルター (最適化: 2.3%)
+    if metrics['entry_volatility'] > 2.3:
+        return {"action": "HOLD", "confidence": 0, "reason": f"【鉄の掟】ボラティリティ過大 ({metrics['entry_volatility']:.2f}%)"}
     if metrics['trend_momentum'] < 0:
         return {"action": "HOLD", "confidence": 0, "reason": "【鉄の掟】下降トレンド中 (Momentum < 0)"}
     if metrics['sma25_dev'] < 0:
         return {"action": "HOLD", "confidence": 0, "reason": "【鉄の掟】SMA25割れ (戻り待ち)"}
-    if metrics['entry_volatility'] > 2.5:
-        return {"action": "HOLD", "confidence": 0, "reason": f"【鉄の掟】ボラティリティ過大 ({metrics['entry_volatility']:.2f}%)"}
 
     prompt = f"""
 ### CONTEXT
@@ -332,7 +323,7 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, macro, news, fundam
 【テクニカル指標】
 - トレンド勢い: {metrics['trend_momentum']:.2f} (プラス必須)
 - SMA25乖離率: {metrics['sma25_dev']:.2f}% (プラス圏)
-- ボラティリティ: {metrics['entry_volatility']:.2f}% (2.5%以下推奨)
+- ボラティリティ: {metrics['entry_volatility']:.2f}% (2.3%以下推奨)
 - RSI(9): {metrics['rsi_9']:.1f}
 - ATR: {metrics['atr_value']:.1f}
 - 週足トレンド: {weekly}
@@ -343,7 +334,7 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, macro, news, fundam
 
 【ニュース】
 {news}
-
+### PAST SIMILAR CASES
 {cbr_text}
 
 ### TASK
@@ -424,6 +415,7 @@ if __name__ == "__main__":
     
     report_message = f"**📊 AI市場監視レポート ({today})**\n\n{macro}\n"
     buy_list = []
+    all_stock_prices = [] # 全銘柄価格リスト
     
     SAVE_TARGETS = [
         {"path": LOG_FILE, "name": "学習メモリ"},
@@ -452,8 +444,19 @@ if __name__ == "__main__":
         metrics = calculate_metrics_enhanced(df)
         if metrics is None: print("Skip"); continue
         
-        # 3. 鉄の掟フィルター (API節約)
-        if metrics['trend_momentum'] < 0 or metrics['sma25_dev'] < 0 or metrics['entry_volatility'] > 2.5:
+        # --- 株価リスト用データ作成 (フィルター前に実施) ---
+        current_price = metrics['price']
+        try:
+            prev_close = df['Close'].iloc[-2]
+            change = current_price - prev_close
+            change_pct = (change / prev_close) * 100
+            price_str = f"• {tic}: {current_price:,.0f}円 ({change:+.0f} / {change_pct:+.2f}%)"
+        except:
+            price_str = f"• {tic}: {current_price:,.0f}円"
+        all_stock_prices.append(price_str)
+
+        # 3. 鉄の掟フィルター (最適化: 2.3%)
+        if metrics['trend_momentum'] < 0 or metrics['sma25_dev'] < 0 or metrics['entry_volatility'] > 2.3:
              print("⏹️ Filtered"); continue
 
         # 付加情報取得
@@ -482,9 +485,9 @@ if __name__ == "__main__":
             "Confidence": conf, "stop_loss_price": stop_loss_price, "stop_loss_reason": "ATR_Trailing_Stop",
             "Price": metrics['price'], "sma25_dev": metrics['sma25_dev'], 
             "trend_momentum": metrics['trend_momentum'], "macd_power": metrics['macd_power'],
-            "entry_volatility": metrics['entry_volatility'], 
+            "entry_volatility": metrics['entry_volatility'],
             "profit_loss": 0,
-            "profit_rate": 0.0 # <--- 本番記録用にも項目を追加
+            "profit_rate": 0.0 
         }
         
         # 保存処理 (15時以降のみ)
@@ -512,6 +515,9 @@ if __name__ == "__main__":
             msg = (
                 f"🔴 **BUY {tic}**: {metrics['price']:.0f}円\n"
                 f"🛡️ **推奨損切り**: **{stop_loss_price:.0f}円** (ATR x2.0)\n"
+                f"💡 **運用メモ**: \n"
+                f"・最初は {stop_loss_price:.0f}円 に逆指値。\n"
+                f"・利益が乗ったら建値(買値)まで引き上げること。\n"
                 f"{earnings_warning}\n"
                 f"> 理由: {res.get('reason')}"
             )
@@ -522,5 +528,10 @@ if __name__ == "__main__":
         report_message += "\n\n🚀 **新規BUY推奨**\n" + "\n\n".join(buy_list)
     else:
         report_message += "\n\n💤 推奨なし"
+
+    # 全銘柄リストを追加
+    if all_stock_prices:
+        report_message += "\n\n" + "="*30 + "\n📉 **監視銘柄 株価一覧**\n" + "="*30 + "\n"
+        report_message += "\n".join(all_stock_prices)
 
     send_discord_notify(report_message, filename="FullReport")
