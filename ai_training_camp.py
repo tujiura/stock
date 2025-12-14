@@ -61,7 +61,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.0-flash' 
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
-TRAINING_ROUNDS = 1500
+TRAINING_ROUNDS = 500 
 TIMEFRAME = "1d" 
 CBR_NEIGHBORS_COUNT = 15 
 MIN_VOLATILITY = 1.0 
@@ -155,7 +155,7 @@ def calculate_metrics_enhanced(df, idx):
     }
 
 # ==========================================
-# 2. CBRメモリシステム (★自動修復・過去データ計算付き)
+# 2. CBRメモリシステム
 # ==========================================
 class CaseBasedMemory:
     def __init__(self, csv_path):
@@ -165,7 +165,6 @@ class CaseBasedMemory:
         self.df = pd.DataFrame()
         self.feature_cols = ['sma25_dev', 'trend_momentum', 'macd_power', 'entry_volatility', 'rsi_9']
         
-        # 保存するCSVの列定義 (rsi_9, profit_rate を含む)
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
@@ -182,26 +181,20 @@ class CaseBasedMemory:
             
             # --- スキーマ更新 & 過去データの再計算 ---
             cols_added = False
-            
-            # 1. 不足カラムの追加
             for col in self.csv_columns:
                 if col not in self.df.columns:
                     self.df[col] = 0.0 if col != 'Reason' else ''
                     cols_added = True
             
-            # 2. 利益率(profit_rate)が 0 の過去データについて、損益と価格から逆算
-            #    (profit_loss / Price) * 100
             if 'profit_rate' in self.df.columns and 'profit_loss' in self.df.columns and 'Price' in self.df.columns:
-                # profit_rateが0 または NaN で、かつ Price が0じゃない行を抽出
                 mask = (self.df['profit_rate'] == 0) & (self.df['profit_loss'] != 0) & (self.df['Price'] != 0)
                 if mask.any():
                     print(f"🔄 過去データの利益率を自動計算して補完します ({mask.sum()}件)...")
                     self.df.loc[mask, 'profit_rate'] = (self.df.loc[mask, 'profit_loss'] / self.df.loc[mask, 'Price']) * 100
                     cols_added = True
 
-            # 変更があれば保存
             if cols_added:
-                self.df = self.df[self.csv_columns] # 列順序を整える
+                self.df = self.df[self.csv_columns] 
                 self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
                 print("✅ CSVファイルを最新形式にアップデートしました。")
 
@@ -209,7 +202,6 @@ class CaseBasedMemory:
             print(f"⚠️ CSV読込エラー: {e}")
             try:
                 self.df = pd.read_csv(self.csv_path, on_bad_lines='skip')
-                # 最小限の復旧
                 for col in self.csv_columns:
                     if col not in self.df.columns: self.df[col] = 0.0
                 self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
@@ -243,6 +235,7 @@ class CaseBasedMemory:
     def search_similar_cases(self, current_metrics):
         if self.knn is None: return "（学習データ不足）"
         metrics_vec = [current_metrics.get(col, 0) for col in self.feature_cols]
+        # DataFrame化して警告回避
         input_df = pd.DataFrame([metrics_vec], columns=self.feature_cols)
         scaled_vec = self.scaler.transform(input_df)
         distances, indices = self.knn.kneighbors(scaled_vec)
@@ -363,10 +356,10 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
         return {"action": "HOLD", "reason": f"Error: {e}", "confidence": 0, "stop_loss_price": 0}
 
 # ==========================================
-# 4. メイン実行 (★可変式トレーリング & 過去データ補完版)
+# 4. メイン実行 (★攻撃的利益追求ロジック版)
 # ==========================================
 def main():
-    print(f"=== AI強化合宿 (可変式トレーリング + データ自動修復) ===")
+    print(f"=== AI強化合宿 (Aggressive Profit Pursuit ver) ===")
     
     memory_system = CaseBasedMemory(LOG_FILE) 
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
@@ -422,9 +415,10 @@ def main():
             current_stop_loss = entry_price - (current_atr * 2.0)
             max_price = entry_price 
 
-            future_prices = df['Close'].iloc[target_idx+1 : target_idx+6]
-            future_lows = df['Low'].iloc[target_idx+1 : target_idx+6]
-            future_highs = df['High'].iloc[target_idx+1 : target_idx+6]
+            # 未来データ (最大60営業日まで追跡)
+            future_prices = df['Close'].iloc[target_idx+1 : target_idx+61]
+            future_lows = df['Low'].iloc[target_idx+1 : target_idx+61]
+            future_highs = df['High'].iloc[target_idx+1 : target_idx+61]
             
             is_win = False; is_loss = False
             final_exit_price = entry_price
@@ -438,19 +432,20 @@ def main():
                         final_exit_price = current_stop_loss 
                         break
                     
-                    # ラチェット式トレーリング
+                    # ★攻撃的トレーリングロジック★
                     if p_high > max_price:
                         max_price = p_high
                         current_profit_pct = (max_price - entry_price) / entry_price
                         
-                        if current_profit_pct > 0.05: trail_width = current_atr * 0.5 
-                        elif current_profit_pct > 0.03: trail_width = current_atr * 1.0 
-                        else: trail_width = current_atr * 2.0 
+                        # +3.0%までは初期SLで耐える (ノイズ対策)
+                        trail_width = 999999 
+                        if current_profit_pct > 0.05: trail_width = current_atr * 0.5  # 鬼利確
+                        elif current_profit_pct > 0.03: trail_width = current_atr * 1.5 # 追従開始
                             
                         new_stop_loss = max_price - trail_width
                         
-                        # 建値ガード
-                        if current_profit_pct > 0.015:
+                        # 建値ガード (+2.5%で発動)
+                        if current_profit_pct > 0.025:
                              break_even_price = entry_price * 1.001
                              new_stop_loss = max(new_stop_loss, break_even_price)
 
@@ -479,7 +474,7 @@ def main():
                 'Action': action, 'result': result, 
                 'Reason': decision.get('reason', 'None'),
                 'Confidence': conf,
-                'stop_loss_price': current_stop_loss, 'stop_loss_reason': "Dynamic_Trailing_Stop", 
+                'stop_loss_price': current_stop_loss, 'stop_loss_reason': "Aggressive_Trailing", 
                 'Price': metrics['price'], 'sma25_dev': metrics['sma25_dev'], 
                 'trend_momentum': metrics['trend_momentum'], 'macd_power': metrics['macd_power'],
                 'entry_volatility': metrics['entry_volatility'], 'rsi_9': metrics['rsi_9'], 
@@ -499,4 +494,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    auto_git_push(commit_message="Training Camp: Data Repair & Profit Rate")
+    auto_git_push(commit_message="Training Camp: Aggressive Profit Logic")
