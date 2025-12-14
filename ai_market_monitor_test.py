@@ -50,10 +50,14 @@ genai.configure(api_key=GOOGLE_API_KEY)
 # ファイル設定
 LOG_FILE = "ai_trade_memory_risk_managed.csv" # 学習用メモリ
 REAL_TRADE_LOG_FILE = "real_trade_record.csv" # 実戦用ログ
-MODEL_NAME = 'models/gemini-3-pro-preview' 
+MODEL_NAME = 'models/gemini-2.0-flash' 
 
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
+
+# ★資金設定
+INITIAL_CAPITAL = 10000000 # 運用資金 (1,000万円)
+RISK_PER_TRADE = 0.02      # リスク許容率 (2%)
 
 # 監視リスト
 WATCH_LIST = [
@@ -111,6 +115,7 @@ def get_macro_data():
     return report.strip()
 
 def get_fundamentals(ticker):
+    """ファンダメンタルズ情報を取得"""
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
@@ -125,6 +130,7 @@ def get_fundamentals(ticker):
         return f"- {name}\n- PER:{per_str}, PBR:{pbr_str}, ROE:{roe_str}"
     except: return "取得エラー"
 
+    
 def get_latest_news(ticker):
     try:
         q = urllib.parse.quote(f"{ticker} 株価 ニュース")
@@ -158,6 +164,19 @@ def get_weekly_trend(ticker):
         elif price < sma13 < sma26: return "下降 📉 (弱)"
         else: return "レンジ ➡️"
     except: return "不明"
+
+def get_current_cash():
+    """実戦ログから現在の有効資金を推定する"""
+    total_profit = 0
+    if os.path.exists(REAL_TRADE_LOG_FILE):
+        try:
+            df = pd.read_csv(REAL_TRADE_LOG_FILE, on_bad_lines='skip')
+            # 列名正規化
+            df.columns = [c.strip().lower() for c in df.columns]
+            if 'profit_loss' in df.columns:
+                total_profit = pd.to_numeric(df['profit_loss'], errors='coerce').fillna(0).sum()
+        except: pass
+    return INITIAL_CAPITAL + total_profit
 
 # ==========================================
 # 2. 指標計算
@@ -213,8 +232,6 @@ class CaseBasedMemory:
         self.knn = None
         self.df = pd.DataFrame()
         self.feature_cols = ['sma25_dev', 'trend_momentum', 'macd_power', 'entry_volatility', 'rsi_9']
-        
-        # ★ rsi_9 を含むカラム定義
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "stop_loss_reason", "Price", 
@@ -225,27 +242,21 @@ class CaseBasedMemory:
 
     def load_and_train(self):
         if not os.path.exists(self.csv_path): return
-        
         try:
             self.df = pd.read_csv(self.csv_path)
-            
-            # --- スキーマ自動更新 ---
+            # スキーマ自動更新
             missing_cols = [col for col in self.csv_columns if col not in self.df.columns]
             if missing_cols:
-                print(f"🔧 CSVスキーマ更新: {missing_cols} を追加します...")
-                for col in missing_cols:
-                    self.df[col] = 0.0
+                for col in missing_cols: self.df[col] = 0.0
                 self.df = self.df[self.csv_columns]
                 self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
-
-        except Exception as e:
-            print(f"⚠️ CSV読込エラー: {e}")
+        except Exception:
             try:
                 self.df = pd.read_csv(self.csv_path, on_bad_lines='skip')
-                missing_cols = [col for col in self.csv_columns if col not in self.df.columns]
-                for col in missing_cols: self.df[col] = 0.0
+                for col in self.csv_columns:
+                    if col not in self.df.columns: self.df[col] = 0.0
                 self.df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
-            except Exception: return
+            except: return
 
         try:
             rename_map = {'date': 'Date', 'ticker': 'Ticker', 'action': 'Action', 'result': 'result'}
@@ -275,7 +286,7 @@ class CaseBasedMemory:
         scaled_vec = self.scaler.transform(input_df)
         distances, indices = self.knn.kneighbors(scaled_vec)
         
-        text = f"【類似過去事例】\n"
+        text = f"【過去の類似局面】\n"
         win_c = 0; loss_c = 0
         for idx in indices[0]:
             row = self.valid_df_for_knn.iloc[idx]
@@ -283,12 +294,12 @@ class CaseBasedMemory:
             if res == 'WIN': win_c += 1
             if res == 'LOSS': loss_c += 1
             icon = "⭕" if res=='WIN' else "❌"
-            text += f"- {row.get('Date')} {row.get('Ticker')}: {icon} (MOM:{row.get('trend_momentum',0):.1f})\n"
+            text += f"- {row.get('Date')} {row.get('Ticker')}: {icon}\n"
         text += f"-> 傾向: 勝ち{win_c} / 負け{loss_c}\n"
         return text
 
 # ==========================================
-# 4. AI判定
+# 4. AIエージェント (Analyst & Commander)
 # ==========================================
 def create_chart_image(df, name):
     data = df.tail(100).copy()
@@ -303,33 +314,31 @@ def create_chart_image(df, name):
     buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=80); plt.close(fig); buf.seek(0)
     return {"mime_type": "image/png", "data": buf.getvalue()}
 
-def ai_decision_maker(model, chart_bytes, metrics, cbr_text, macro, news, fundamentals, weekly, ticker):
-    # 鉄の掟フィルター (最適化: 2.3%)
-    if metrics['entry_volatility'] > 2.3:
-        return {"action": "HOLD", "confidence": 0, "reason": f"【鉄の掟】ボラティリティ過大 ({metrics['entry_volatility']:.2f}%)"}
-    if metrics['trend_momentum'] < 0:
-        return {"action": "HOLD", "confidence": 0, "reason": "【鉄の掟】下降トレンド中 (Momentum < 0)"}
-    if metrics['sma25_dev'] < 0:
-        return {"action": "HOLD", "confidence": 0, "reason": "【鉄の掟】SMA25割れ (戻り待ち)"}
-
+# 🕵️‍♂️ 市場分析官 (Market Analyst)
+def run_market_analyst(model, chart_bytes, metrics, cbr_text, macro, news, fundamentals, weekly, ticker):
     prompt = f"""
-### CONTEXT
-対象: {ticker}
-【テクニカル指標】
-- トレンド勢い: {metrics['trend_momentum']:.2f} (プラス必須)
-- SMA25乖離率: {metrics['sma25_dev']:.2f}% (プラス圏)
-- ボラティリティ: {metrics['entry_volatility']:.2f}% (2.3%以下推奨)
-- RSI(9): {metrics['rsi_9']:.1f}
-- ATR: {metrics['atr_value']:.1f}
-- 週足トレンド: {weekly}
+あなたはプロの「株式市場分析官」です。
+提供されたチャートとデータに基づき、対象銘柄の相場環境を客観的に分析してください。
+売買の決断は「指令官」が行うため、あなたは事実と分析結果の報告のみを行ってください。
 
+### 分析対象
+銘柄: {ticker}
+現在値: {metrics['price']:.0f}円
+
+### マクロ・ファンダメンタルズ
 {macro}
-
 {fundamentals}
-
-【ニュース】
 {news}
 
+### テクニカル指標データ
+- 週足トレンド: {weekly}
+- トレンドの勢い (Momentum): {metrics['trend_momentum']:.2f} (プラスなら上昇基調)
+- 移動平均乖離率 (SMA25 Dev): {metrics['sma25_dev']:.2f}%
+- ボラティリティ (変動率): {metrics['entry_volatility']:.2f}% (基準値: 2.3%以下が望ましい)
+- RSI (9日): {metrics['rsi_9']:.1f} (40-60は健全、70以上は過熱)
+- ATR (平均値幅): {metrics['atr_value']:.1f}円
+
+### 過去の類似パターン
 {cbr_text}
 
 ### TASK
@@ -356,8 +365,7 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, macro, news, fundam
    データ分析の結果、**自信過剰(85点以上)は負けフラグ**であることが判明している。
    - **80-85 (推奨):** [ゴールデン・ゾーン] に完全に合致し、ボラティリティが2.0%未満の場合。
    - **60-79 (慎重):** 条件は満たすが、ボラティリティが2.0%〜2.6%の場合。
-   - **0 (論外):** 禁止条件に1つでも該当する場合。自信度を0にせよ。
-
+   - **0
 ### OUTPUT FORMAT (JSON ONLY)
 {{
   "action": "BUY", "HOLD", "SELL",
@@ -371,23 +379,63 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, macro, news, fundam
     safety = {HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
     try:
         response = model.generate_content([prompt, chart_bytes], safety_settings=safety)
+        return response.text
+    except Exception as e:
+        return f"分析エラー: {e}"
+
+# 👮‍♂️ 運用指令官 (Strategy Commander)
+def run_strategy_commander(model, ticker, metrics, analyst_report, cash, risk_per_trade=0.02):
+    # 資金管理計算 (AIへのヒント)
+    risk_amount = cash * risk_per_trade
+    risk_per_share = metrics['atr_value'] * 2.0
+    max_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 0
+    
+    prompt = f"""
+あなたは冷徹な「運用指令官（ファンドマネージャー）」です。
+「分析官」からの報告書と、現在の資金状況に基づき、最終的な売買注文を決定してください。
+
+### 現在の状況
+- 対象銘柄: {ticker}
+- 現在値: {metrics['price']:.0f}円
+- 手元資金: {cash:,.0f}円
+- 許容リスク額: {risk_amount:,.0f}円
+- 最大購入可能株数（リスク管理上）: {max_shares}株
+
+### 分析官からの報告書
+{analyst_report}
+
+### 鉄の掟（厳守）
+1. ボラティリティが2.3%を超えている場合は「HOLD（見送り）」すること。
+2. 下降トレンド中の「逆張り（値ごろ感での買い）」は禁止。
+3. アナリストの報告に少しでも不安要素があれば、無理にエントリーしないこと。
+
+### あなたの任務
+JSON形式で以下の指令を出力してください。
+{{
+  "action": "BUY" または "HOLD",
+  "shares": (購入する場合の株数。最大株数以下で、自信度に応じて調整),
+  "stop_loss": (損切り価格。基本は 現在値 - ATR*2.0),
+  "reason": (決断の理由を100文字以内で)
+}}
+"""
+    try:
+        response = model.generate_content(prompt)
         text = response.text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match: text = match.group(0)
-        return json.loads(text)
+        if match:
+            return json.loads(match.group(0))
     except Exception as e:
-        return {"action": "HOLD", "reason": f"AI Error: {e}", "confidence": 0}
+        return {"action": "HOLD", "reason": f"System Error: {e}", "confidence": 0}
+    return {"action": "HOLD", "reason": "No response", "confidence": 0}
 
 def send_discord_notify(message, filename=None):
     if not webhook_url: return
     try:
         now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
         payload = {"content": f"📊 **AI市場監視レポート ({now_str})**\n{message[:1500]}"}
-        
         files = {}
         if filename:
             files["file"] = (f"Report_{now_str.replace(':','-')}.txt", message.encode('utf-8'))
-            
         requests.post(webhook_url, data=payload, files=files if filename else None)
         print("✅ Discord通知送信")
     except Exception as e:
@@ -398,7 +446,7 @@ def send_discord_notify(message, filename=None):
 # ==========================================
 if __name__ == "__main__":
     today = datetime.datetime.now().strftime('%Y-%m-%d')
-    print(f"=== AI市場監視システム ({today}) ===")
+    print(f"=== AI市場監視システム (Test ver: Dual Agent) ({today}) ===")
     
     WATCH_LIST = sorted(list(set(WATCH_LIST)))
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
@@ -408,9 +456,13 @@ if __name__ == "__main__":
     macro = get_macro_data()
     print(macro)
     
-    report_message = f"**📊 AI市場監視レポート ({today})**\n\n{macro}\n"
+    # 現在の資金を取得
+    current_cash = get_current_cash()
+    print(f"💰 現在の運用資金: {current_cash:,.0f}円")
+    
+    report_message = f"**📊 AI市場監視レポート ({today})**\n資金: {current_cash:,.0f}円\n\n{macro}\n"
     buy_list = []
-    all_stock_prices = [] # 全銘柄価格リスト
+    all_stock_prices = [] 
     
     SAVE_TARGETS = [
         {"path": LOG_FILE, "name": "学習メモリ"},
@@ -439,20 +491,21 @@ if __name__ == "__main__":
         metrics = calculate_metrics_enhanced(df)
         if metrics is None: print("Skip"); continue
         
+        # 株価リスト用
         current_price = metrics['price']
         try:
             prev_close = df['Close'].iloc[-2]
             change = current_price - prev_close
             change_pct = (change / prev_close) * 100
             price_str = f"• {tic}: {current_price:,.0f}円 ({change:+.0f} / {change_pct:+.2f}%)"
-        except:
-            price_str = f"• {tic}: {current_price:,.0f}円"
+        except: price_str = f"• {tic}: {current_price:,.0f}円"
         all_stock_prices.append(price_str)
 
-        # 3. 鉄の掟フィルター
+        # 3. 鉄の掟フィルター (2.3%)
         if metrics['trend_momentum'] < 0 or metrics['sma25_dev'] < 0 or metrics['entry_volatility'] > 2.3:
              print("⏹️ Filtered"); continue
 
+        # 付加情報取得
         earnings_date = get_earnings_date(tic)
         cbr_text = memory.search_similar_cases(metrics)
         chart = create_chart_image(df, tic)
@@ -460,34 +513,42 @@ if __name__ == "__main__":
         fund = get_fundamentals(tic)
         weekly = get_weekly_trend(tic)
         
-        res = ai_decision_maker(model_instance, chart, metrics, cbr_text, macro, news, fund, weekly, tic)
+        # --- 🤖 Dual Agent Process ---
+        # 1. 分析官によるレポート作成
+        analyst_report = run_market_analyst(model_instance, chart, metrics, cbr_text, macro, news, fund, weekly, tic)
         
-        action = res.get('action', 'HOLD')
-        conf = res.get('confidence', 0)
+        # 2. 指令官による売買決断
+        decision = run_strategy_commander(model_instance, tic, metrics, analyst_report, current_cash, RISK_PER_TRADE)
         
-        # ATRトレーリングストップ計算
-        stop_loss_price = 0
-        if action == "BUY":
-            atr_stop = metrics['atr_value'] * 2.0
-            stop_loss_price = metrics['price'] - atr_stop
+        action = decision.get('action', 'HOLD')
+        shares = decision.get('shares', 0)
+        stop_loss_price = decision.get('stop_loss', 0)
+        reason = decision.get('reason', 'None')
         
-        # CSVデータ作成 (★rsi_9 を保存)
+        # HOLDならスキップ
+        if action != "BUY" or shares <= 0:
+            print(f"👀 HOLD")
+            continue
+
+        # BUY確定時の処理
+        invest_amount = shares * metrics['price']
+        print(f"🔴 BUY! {shares}株")
+        
+        # CSVデータ作成
         item = {
             "Date": today, "Ticker": tic, "Timeframe": TIMEFRAME, 
-            "Action": action, "result": "", "Reason": res.get('reason', 'None'), 
-            "Confidence": conf, "stop_loss_price": stop_loss_price, "stop_loss_reason": "ATR_Trailing_Stop",
+            "Action": action, "result": "", "Reason": reason, 
+            "Confidence": 80, # 指令官がBUYした時点で自信ありとみなす
+            "stop_loss_price": stop_loss_price, "stop_loss_reason": "AI_Commander_Order",
             "Price": metrics['price'], "sma25_dev": metrics['sma25_dev'], 
             "trend_momentum": metrics['trend_momentum'], "macd_power": metrics['macd_power'],
-            "entry_volatility": metrics['entry_volatility'], 
-            "rsi_9": metrics['rsi_9'], # <--- 追加
-            "profit_loss": 0,
-            "profit_rate": 0.0 
+            "entry_volatility": metrics['entry_volatility'], "rsi_9": metrics['rsi_9'],
+            "profit_loss": 0, "profit_rate": 0.0 
         }
         
-        # 保存処理 (15時以降のみ)
+        # 保存 (15時以降のみ)
         if is_closing_time:
             df_new = pd.DataFrame([item])
-            # カラム順序を揃える
             for col in memory.csv_columns:
                 if col not in df_new.columns: df_new[col] = None
             df_new = df_new[memory.csv_columns]
@@ -500,24 +561,22 @@ if __name__ == "__main__":
                     else:
                         df_new.to_csv(path, index=False, encoding='utf-8-sig')
                 except: pass
-            print(f"📝 {action} ({conf}%)")
-        else:
-            print(f"👀 {action} ({conf}%)")
+            print(f"📝 記録完了")
 
-        if action == "BUY" and conf >= 70:
-            earnings_warning = f"\n⚠️ **決算注意**: {earnings_date}" if earnings_date != "-" else ""
-            msg = (
-                f"🔴 **BUY {tic}**: {metrics['price']:.0f}円\n"
-                f"🛡️ **推奨損切り**: **{stop_loss_price:.0f}円** (ATR x2.0)\n"
-                f"💡 **運用メモ**: \n"
-                f"・最初は {stop_loss_price:.0f}円 に逆指値。\n"
-                f"・利益が乗ったら建値(買値)まで引き上げること。\n"
-                f"{earnings_warning}\n"
-                f"> 理由: {res.get('reason')}"
-            )
-            buy_list.append(msg)
+        # Discord通知作成
+        earnings_warning = f"\n⚠️ **決算注意**: {earnings_date}" if earnings_date != "-" else ""
+        msg = (
+            f"🔴 **BUY {tic}**: {metrics['price']:,.0f}円\n"
+            f"💰 **指令**: {shares}株 (約{invest_amount:,.0f}円)\n"
+            f"🛡️ **逆指値**: **{stop_loss_price:,.0f}円**\n"
+            f"📝 **分析官**: {analyst_report[:60]}...\n"
+            f"👮 **指令官**: {reason}\n"
+            f"{earnings_warning}"
+        )
+        buy_list.append(msg)
         time.sleep(2)
 
+    # 通知送信
     if buy_list:
         report_message += "\n\n🚀 **新規BUY推奨**\n" + "\n\n".join(buy_list)
     else:
