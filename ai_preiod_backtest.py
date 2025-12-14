@@ -17,8 +17,8 @@ import logging
 # ==========================================
 # ★設定エリア: バックテスト設定
 # ==========================================
-START_DATE = "2024-06-01"  # 検証開始日
-INITIAL_CAPITAL = 100000 # 初期資金
+START_DATE = "2024-12-01"  # 検証開始日
+INITIAL_CAPITAL = 100000 # 初期資金 (1,000万円)
 RISK_PER_TRADE = 0.02      # 1トレードあたりの許容リスク (2%)
 MAX_POSITIONS = 10         # 最大保有銘柄数
 
@@ -33,23 +33,26 @@ try:
     load_dotenv(override=True)
 except ImportError: pass
 
-GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY")
+GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY") 
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
 genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.0-flash'
 
-# 監視リスト (検証用)
+# 監視リスト
 TRAINING_LIST = [
-    "8035.T", "6146.T", "6857.T", "6723.T", "7735.T", "6526.T", "6758.T", "6861.T", "6501.T",
-    "6594.T", "7751.T", "6702.T", "6752.T", "6981.T", "6954.T", "6920.T",
-    "7203.T", "7267.T", "7269.T", "7270.T", "7011.T", "6301.T", "6367.T", "6098.T",
-    "8306.T", "8316.T", "8411.T", "8766.T", "8591.T", "8604.T",
-    "8058.T", "8031.T", "8001.T", "8002.T", "8053.T",
-    "9432.T", "9433.T", "9984.T", "4661.T", "9613.T", "2413.T", "4751.T", "4385.T",
-    "9983.T", "3382.T", "8267.T", "2802.T", "2914.T", "4911.T",
-    "9101.T", "9104.T", "9107.T", "9020.T", "9021.T", "9201.T",
-    "5401.T", "1605.T", "5713.T", "4063.T", "4901.T"
+    "6146.T", "8035.T", "9983.T", "7741.T", "6857.T", "7012.T", "6367.T", "7832.T",
+    "1801.T", "9766.T", "2801.T", "4063.T", "4543.T", "4911.T", "4507.T",
+    "9432.T", "9433.T", "9434.T", "4503.T", "4502.T", "2502.T", "2503.T", "2802.T",
+    "4901.T", "1925.T", "1928.T", "1802.T", "1803.T", "1812.T", "9020.T", "9021.T",
+    "9532.T", "9735.T", "9613.T",
+    "8306.T", "8316.T", "8411.T", "8308.T", "8309.T", "8331.T", "8354.T", "8766.T",
+    "8725.T", "8591.T", "8593.T", "8604.T", "8473.T", "8630.T", "8697.T",
+    "8058.T", "8031.T", "8001.T", "8002.T", "8015.T", "2768.T", "8053.T", "7459.T",
+    "8088.T", "9962.T", "3092.T", "3382.T",
+    "7011.T", "7013.T", "6301.T", "7203.T", "7267.T", "7269.T", "7270.T", "7201.T",
+    "5401.T", "5411.T", "5713.T", "1605.T", "5020.T",
+    "6501.T", "6503.T", "6305.T", "6326.T", "6383.T", "6471.T", "6473.T", "7751.T"
 ]
 plt.rcParams['font.family'] = 'sans-serif' 
 
@@ -206,94 +209,125 @@ class MarketAnalystAI:
             return response.text
         except: return "分析エラー"
 
-# 👮‍♂️ 運用指令官 (Strategy Commander)
+# 👮‍♂️ 運用指令官 (Strategy Commander - Batch Mode)
 class StrategyCommanderAI:
     def __init__(self, model):
         self.model = model
 
-    def make_decision(self, ticker, metrics, analyst_report, cash):
-        # 資金管理計算 (ヒントとして提示)
-        risk_amount = cash * RISK_PER_TRADE
-        risk_per_share = metrics['atr_value'] * 2.0
-        max_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 0
-        
+    def make_batch_decision(self, candidates_data, current_cash, current_portfolio):
+        # ポートフォリオ情報の作成
+        portfolio_text = "なし"
+        if current_portfolio:
+            portfolio_text = "\n".join([f"- {t}: {p['shares']}株 (取得{p['buy_price']:.0f}円)" for t, p in current_portfolio.items()])
+
+        # 候補リストの作成
+        candidates_text = ""
+        for c in candidates_data:
+            # リスク計算 (1株あたりのATR*2)
+            risk_per_share = c['metrics']['atr_value'] * 2.0
+            max_shares = int((current_cash * RISK_PER_TRADE) // risk_per_share) if risk_per_share > 0 else 0
+            
+            candidates_text += f"""
+--- 候補: {c['ticker']} ---
+現在値: {c['metrics']['price']:.0f}円
+推奨最大株数: {max_shares}株 (リスク管理上限)
+【分析官報告】
+{c['report']}
+-------------------------
+"""
+
         prompt = f"""
-あなたは冷徹な「運用指令官」です。
-分析官の報告と資金状況に基づき、売買命令を下してください。
+あなたは冷徹な運用指令官（ファンドマネージャー）です。
+分析官から上がってきた有望銘柄のレポートと、現在の資金・ポートフォリオ状況を総合的に判断し、ベストな買い注文を決定してください。
 
-### 状況
-- 銘柄: {ticker}
-- 現在値: {metrics['price']:.0f}円
-- 手元資金: {cash:,.0f}円
-- 最大購入可能株数（リスク管理上）: {max_shares}株
+### 現在の状況
+- 手元資金: {current_cash:,.0f}円
+- 現在の保有株:
+{portfolio_text}
 
-### 分析官の報告
-{analyst_report}
+- 全体方針: 資産防衛最優先。無理に全額投資する必要はない。自信のある銘柄に絞る。
+
+### 候補銘柄レポート
+{candidates_text}
 
 ### 鉄の掟（厳守）
-1. ボラティリティが2.3%超えならHOLD。
-2. 下降トレンド中の逆張り禁止。
-3. 少しでも不安要素があればHOLD。
+1. ボラティリティが高い銘柄、下降トレンドの銘柄は除外せよ。
+2. アナリスト報告に不安要素がある場合は見送れ。
+3. 資金内で買える範囲に収めること。
+4. 既に保有している銘柄と似たような銘柄ばかり買わないこと（分散効果）。
 
-### 任務
-JSON形式で指令を出力してください。
+### あなたの任務
+**JSON形式**で、実際にエントリーする銘柄と数量のリストを出力してください。
+見送る銘柄はリストに含めなくて良いです。
+
+出力フォーマット:
 {{
-  "action": "BUY" or "HOLD",
-  "shares": (自信度に応じて最大株数以下で調整),
-  "stop_loss": (現在値 - ATR*2.0 を基準に設定),
-  "reason": (理由を100文字以内で)
+  "orders": [
+    {{
+      "ticker": "銘柄コード",
+      "action": "BUY",
+      "shares": 購入株数 (整数),
+      "stop_loss": 損切り価格 (現在値 - ATR*2.0を目安),
+      "reason": "選定理由を50文字以内で"
+    }}
+  ]
 }}
 """
         try:
             response = self.model.generate_content(prompt)
             text = response.text.replace("```json", "").replace("```", "").strip()
             match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match: return json.loads(match.group(0))
-        except: return {"action": "HOLD", "reason": "System Error"}
-        return {"action": "HOLD", "reason": "No response"}
+            if match:
+                return json.loads(match.group(0))
+        except: return {"orders": []}
+        return {"orders": []}
 
 # ==========================================
-# 3. システムコンポーネント
+# 3. メモリシステム (警告修正版)
 # ==========================================
 class MemorySystem:
     def __init__(self, csv_path):
         self.df = pd.DataFrame()
+        self.feature_cols = ['sma25_dev', 'trend_momentum', 'macd_power', 'entry_volatility', 'rsi_9']
+        
         if os.path.exists(csv_path):
             try:
                 self.df = pd.read_csv(csv_path)
                 self.valid_df = self.df[self.df['result'].isin(['WIN', 'LOSS'])].copy()
                 if len(self.valid_df) > 5:
-                    cols = ['sma25_dev', 'trend_momentum', 'macd_power', 'entry_volatility', 'rsi_9']
-                    features = self.valid_df[cols].fillna(0)
+                    features = self.valid_df[self.feature_cols].fillna(0)
                     self.scaler = StandardScaler()
+                    # カラム名付きDataFrameでfitさせることで警告回避
                     self.knn = NearestNeighbors(n_neighbors=10).fit(self.scaler.fit_transform(features))
             except: pass
 
     def get_similar_cases_text(self, metrics):
         if not hasattr(self, 'knn'): return "データ不足"
-        vec = [metrics[c] for c in ['sma25_dev', 'trend_momentum', 'macd_power', 'entry_volatility', 'rsi_9']]
-        dists, indices = self.knn.kneighbors(self.scaler.transform([vec]))
+        
+        # 入力データをDataFrame化
+        vec = [metrics[c] for c in self.feature_cols]
+        input_df = pd.DataFrame([vec], columns=self.feature_cols)
+        
+        dists, indices = self.knn.kneighbors(self.scaler.transform(input_df))
         
         wins = 0
         for idx in indices[0]:
             if self.valid_df.iloc[idx]['result'] == 'WIN': wins += 1
         win_rate = wins / len(indices[0]) * 100
-        return f"過去の類似局面勝率: {win_rate:.1f}%"
+        return f"類似局面勝率: {win_rate:.1f}%"
 
 # ==========================================
-# 4. バックテスト実行メイン
+# 4. メイン実行
 # ==========================================
 def main():
-    print(f"=== 📅 AI Dual-Agent バックテスト ({START_DATE} 〜) ===")
+    print(f"=== 📅 AI Dual-Agent バッチ・バックテスト ({START_DATE} 〜) ===")
     print(f"初期資金: {INITIAL_CAPITAL:,.0f}円 | リスク: {RISK_PER_TRADE*100}%")
     
-    # 準備
     memory = MemorySystem(LOG_FILE)
     model = genai.GenerativeModel(MODEL_NAME)
     analyst = MarketAnalystAI(model)
     commander = StrategyCommanderAI(model)
 
-    # 1. データ取得
     print("データ取得中...", end="")
     tickers_data = {}
     for t in TRAINING_LIST:
@@ -303,12 +337,10 @@ def main():
             tickers_data[t] = df
     print(f"完了 ({len(tickers_data)}銘柄)")
 
-    # 2. カレンダー生成
     all_dates = sorted(list(set([d for t in tickers_data for d in tickers_data[t].index])))
     start_dt = pd.to_datetime(START_DATE).tz_localize(None)
     sim_dates = [d for d in all_dates if d.tz_localize(None) >= start_dt]
     
-    # ポートフォリオ初期化
     cash = INITIAL_CAPITAL
     portfolio = {} 
     trade_history = []
@@ -346,35 +378,20 @@ def main():
                 closed_tickers.append(ticker)
                 continue
 
-            # トレーリング更新 (可変式ラチェット)
+            # トレーリング更新 (改良版: 利益追求)
             if day_high > pos['max_price']:
                 pos['max_price'] = day_high
                 profit_pct = (pos['max_price'] - pos['buy_price']) / pos['buy_price']
                 
-                # ラチェット幅調整
-                width = pos['atr'] * 2.0 # 基本
-                if profit_pct > 0.05: # +5%超え (鬼利確)
-                    width = pos['atr'] * 0.5
-                elif profit_pct > 0.03: # +3%超え (利益確保)
-                    width = pos['atr'] * 1.5 
-                else:
-                    # +3%未満は追従せず、初期SLのまま耐える (ノイズ対策)
-                    width = 999999 # 実質追従なし
-
-                new_sl = pos['max_price'] - width
-
-                # 建値ガード (発動ラインを 1.5% -> 2.5% に引き上げ)
-                if profit_pct > 0.025: 
-                    new_sl = max(new_sl, pos['buy_price'] * 1.001)
-
-                # ただし、初期SLより下がることはない
-                if new_sl > pos['sl_price']:
-                    pos['sl_price'] = new_sl
-
+                # +3%までは初期SLで耐える (ノイズ対策)
+                width = 999999 
+                if profit_pct > 0.05: width = pos['atr'] * 0.5  # 鬼利確
+                elif profit_pct > 0.03: width = pos['atr'] * 1.5 # 追従開始
+                
                 new_sl = pos['max_price'] - width
                 
-                # 建値ガード (+1.5%で発動)
-                if profit_pct > 0.015:
+                # 建値ガード (発動を2.5%に引き上げ)
+                if profit_pct > 0.025:
                     new_sl = max(new_sl, pos['buy_price'] * 1.001)
                 
                 if new_sl > pos['sl_price']:
@@ -382,16 +399,20 @@ def main():
 
         for t in closed_tickers: del portfolio[t]
 
-        # --- B. 新規エントリー探索 ---
+        # --- B. バッチ新規エントリー (全銘柄スキャン -> 一括判断) ---
+        
         # 資金と枠に余裕がある時だけ
-        if len(portfolio) < MAX_POSITIONS and cash > 500000:
-            candidates = [t for t in tickers_data.keys() if t not in portfolio]
-            import random
-            random.shuffle(candidates)
+        if len(portfolio) < MAX_POSITIONS and cash > 5000:
+            
+            candidates_data = [] # 分析官が合格を出したリスト
+            
+            # 1日あたりスキャンする銘柄をシャッフル (API制限考慮のため全銘柄毎日はきつい場合)
+            # 今回は「鉄の掟」で絞るので全銘柄ループする
             
             check_count = 0
-            for ticker in candidates:
-                if check_count >= 3: break # 1日3銘柄まで (API制限対策)
+            
+            for ticker in tickers_data.keys():
+                if ticker in portfolio: continue
                 
                 df = tickers_data[ticker]
                 if current_date not in df.index: continue
@@ -400,41 +421,53 @@ def main():
                 
                 metrics = calculate_metrics_at_date(df, idx)
                 
-                # 鉄の掟フィルター (コードレベル)
+                # 鉄の掟 (2.3%)
                 if metrics['entry_volatility'] > 2.3 or metrics['trend_momentum'] < 0 or metrics['sma25_dev'] < 0:
                     continue
                 
-                # ここまで来たらAI出動
+                # 有望株発見 -> 分析官へ (1日最大5銘柄程度に制限)
+                if check_count >= 5: break 
                 check_count += 1
                 
                 chart_bytes = create_chart_image_at_date(df, idx, ticker)
                 if not chart_bytes: continue
                 
                 similar_text = memory.get_similar_cases_text(metrics)
-                
-                # 1. 分析官
                 report = analyst.analyze(ticker, metrics, chart_bytes, similar_text)
                 
-                # 2. 指令官
-                decision = commander.make_decision(ticker, metrics, report, cash)
+                candidates_data.append({
+                    'ticker': ticker,
+                    'metrics': metrics,
+                    'report': report
+                })
+                time.sleep(1) # API制限考慮
+
+            # 指令官による一括判断
+            if candidates_data:
+                decision_data = commander.make_batch_decision(candidates_data, cash, portfolio)
                 
-                if decision.get('action') == "BUY":
-                    shares = decision.get('shares', 0)
+                orders = decision_data.get('orders', [])
+                for order in orders:
+                    tic = order.get('ticker')
+                    shares = order.get('shares', 0)
+                    
                     if shares > 0:
-                        cost = shares * metrics['price']
-                        if cost <= cash:
-                            cash -= cost
-                            atr_val = metrics['atr_value']
-                            initial_sl = decision.get('stop_loss', metrics['price'] - atr_val * 2.0)
+                        target = next((c for c in candidates_data if c['ticker'] == tic), None)
+                        if target:
+                            metrics = target['metrics']
+                            cost = shares * metrics['price']
                             
-                            portfolio[ticker] = {
-                                'buy_price': metrics['price'], 'shares': shares,
-                                'sl_price': initial_sl, 'max_price': metrics['price'], 'atr': atr_val
-                            }
-                            print(f"\n   🔴 新規 {ticker}: {shares}株 (SL:{initial_sl:.0f})")
-                            print(f"      理由: {decision.get('reason')}")
-                
-                time.sleep(2)
+                            if cost <= cash:
+                                cash -= cost
+                                atr_val = metrics['atr_value']
+                                # 指令官のSLがあれば採用、なければ自動計算
+                                initial_sl = order.get('stop_loss', metrics['price'] - atr_val * 2.0)
+                                
+                                portfolio[tic] = {
+                                    'buy_price': metrics['price'], 'shares': shares,
+                                    'sl_price': initial_sl, 'max_price': metrics['price'], 'atr': atr_val
+                                }
+                                print(f"\n   🔴 新規 {tic}: {shares}株 (約{cost:,.0f}円) 理由:{order.get('reason')}")
 
         # --- C. 資産集計 ---
         current_equity = cash
@@ -444,7 +477,6 @@ def main():
                 current_equity += price * pos['shares']
         equity_curve.append(current_equity)
 
-    # --- 結果表示 ---
     print("\n" + "="*50)
     print(f"🏁 バックテスト終了")
     print(f"最終資産: {equity_curve[-1]:,.0f}円 (初期: {INITIAL_CAPITAL:,}円)")
