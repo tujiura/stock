@@ -52,7 +52,7 @@ genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
 # ファイル設定
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 REAL_TRADE_LOG_FILE = "real_trade_record.csv" 
-MODEL_NAME = 'models/gemini-3.0-pro-preview' # 高速モデル
+MODEL_NAME = 'models/gemini-3-pro-preview' # 高速モデル
 
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
