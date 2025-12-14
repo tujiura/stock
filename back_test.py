@@ -21,9 +21,9 @@ START_DATE = "2023-01-01"  # テスト開始日
 END_DATE   = "2025-11-30"  # テスト終了日
 
 INITIAL_CAPITAL = 100000 # 初期資金 (10万円)
-RISK_PER_TRADE = 0.05      # リスク許容率
+RISK_PER_TRADE = 0.20      # リスク許容率
 MAX_POSITIONS = 100        # 最大保有銘柄数
-MAX_INVEST_RATIO = 0.4    # 1銘柄集中ガード
+MAX_INVEST_RATIO = 0.8   # 1銘柄集中ガード
 
 # 保存ファイル名
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
@@ -127,7 +127,7 @@ def check_iron_rules(metrics):
     鉄の掟 (Iron Rules) をチェックする関数
     NGの場合は理由を含む辞書を返す。OKの場合はNoneを返す。
     """
-    if metrics['entry_volatility'] > 2.3:
+    if metrics['entry_volatility'] > 5.0:
         return {"action": "HOLD", "reason": f"【鉄の掟】ボラティリティ過大 ({metrics['entry_volatility']:.2f}%)"}
     if metrics['trend_momentum'] < 0:
         return {"action": "HOLD", "reason": "【鉄の掟】下降トレンド中 (Momentum < 0)"}
