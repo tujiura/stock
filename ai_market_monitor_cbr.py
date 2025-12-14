@@ -474,7 +474,7 @@ if __name__ == "__main__":
         # ATRトレーリングストップ計算 (BUYの場合)
         stop_loss_price = 0
         if action == "BUY":
-            atr_stop = metrics['atr_value'] * 2.0
+            atr_stop = metrics['atr_value'] * 1.5
             stop_loss_price = metrics['price'] - atr_stop
         
         # CSVデータ作成 (★profit_rate 0.0で初期化)
@@ -509,15 +509,14 @@ if __name__ == "__main__":
         else:
             print(f"👀 {action} ({conf}%)")
 
-        if action == "BUY" and conf >= 70:
+        if action == "BUY":
             earnings_warning = f"\n⚠️ **決算注意**: {earnings_date}" if earnings_date != "-" else ""
             msg = (
                 f"🔴 **BUY {tic}**: {metrics['price']:.0f}円\n"
-                f"🛡️ **推奨損切り**: **{stop_loss_price:.0f}円** (ATR x2.0)\n"
-                f"💡 **勝利の戦術**: \n"
-                f"   ・含み益+3.0%までは逆指値を動かさない(忍耐)\n"
-                f"   ・+2.5%超で建値ガード発動\n"
-                f"   ・+3%超でATR追従開始、+5%超で鬼利確\n"
+                f"🛡️ **推奨損切り**: **{stop_loss_price:.0f}円** (ATR x1.5)\n"
+                f"💡 **リスクリワード改善戦術**: \n"
+                f"   ・初期リスクを浅く設定(ATR x1.5)\n"
+                f"   ・含み益+5%を超えても焦らず、ATR x1.0の幅で追従して+10%を目指す\n"
                 f"{earnings_warning}\n"
                 f"> 理由: {res.get('reason')}"
             )

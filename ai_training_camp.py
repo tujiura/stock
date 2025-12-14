@@ -61,7 +61,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.0-flash' 
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
-TRAINING_ROUNDS = 500 
+TRAINING_ROUNDS = 15000 
 TIMEFRAME = "1d" 
 CBR_NEIGHBORS_COUNT = 15 
 MIN_VOLATILITY = 1.0 
@@ -412,7 +412,7 @@ def main():
             current_atr = float(metrics['atr_value']) 
             
             # 初期SL: ATR x 2.0
-            current_stop_loss = entry_price - (current_atr * 2.0)
+            current_stop_loss = entry_price - (current_atr * 1.5)
             max_price = entry_price 
 
             # 未来データ (最大60営業日まで追跡)
@@ -437,14 +437,19 @@ def main():
                         max_price = p_high
                         current_profit_pct = (max_price - entry_price) / entry_price
                         
-                        # +3.0%までは初期SLで耐える (ノイズ対策)
-                        trail_width = 999999 
-                        if current_profit_pct > 0.05: trail_width = current_atr * 0.5  # 鬼利確
-                        elif current_profit_pct > 0.03: trail_width = current_atr * 1.5 # 追従開始
+                        # ★ここを変更: 利益を伸ばす設定
+                        if current_profit_pct > 0.10:   # +10%超え: ようやく激狭追従
+                            trail_width = current_atr * 0.5 
+                        elif current_profit_pct > 0.05: # +5%超え: まだ余裕を持たせる
+                            trail_width = current_atr * 1.0 
+                        elif current_profit_pct > 0.03: # +3%超え: 標準追従
+                            trail_width = current_atr * 1.5
+                        else:
+                            trail_width = 999999 # 追従しない
                             
                         new_stop_loss = max_price - trail_width
                         
-                        # 建値ガード (+2.5%で発動)
+                        # 建値ガード (+2.5%で発動は維持)
                         if current_profit_pct > 0.025:
                              break_even_price = entry_price * 1.001
                              new_stop_loss = max(new_stop_loss, break_even_price)
