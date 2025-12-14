@@ -61,7 +61,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 MODEL_NAME = 'models/gemini-2.0-flash' 
 LOG_FILE = "ai_trade_memory_risk_managed.csv" 
 
-TRAINING_ROUNDS = 15000 
+TRAINING_ROUNDS = 2000 
 TIMEFRAME = "1d" 
 CBR_NEIGHBORS_COUNT = 15 
 MIN_VOLATILITY = 1.0 
@@ -296,6 +296,8 @@ def ai_decision_maker(model, chart_bytes, metrics, similar_cases_text, ticker):
         return {"action": "HOLD", "confidence": 0, "reason": "【鉄の掟】下降トレンド中 (Momentum < 0)", "stop_loss_price": 0}
     if metrics['sma25_dev'] < 0:
         return {"action": "HOLD", "confidence": 0, "reason": "【鉄の掟】SMA25割れ (戻り待ち)", "stop_loss_price": 0}
+    if metrics['entry_volatility'] < 1.5:
+        return {"action": "HOLD", "reason": f"【鉄の掟】ボラティリティ過小 ({metrics['entry_volatility']:.2f}%)"}
 
     prompt = f"""
 ### CONTEXT
