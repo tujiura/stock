@@ -34,18 +34,17 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
 
-# ★ファイル名をV7に変更
-LOG_FILE = "ai_trade_memory_aggressive_v7.csv" 
+# ★ファイル名をV7_VOLに変更
+LOG_FILE = "ai_trade_memory_aggressive_v7_vol.csv" 
 MODEL_NAME = 'models/gemini-2.0-flash'
 
 TRAINING_ROUNDS = 5000
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
-TRADE_BUDGET = 1000000 
+TRADE_BUDGET = 100000  # 1トレードあたりの投資金額 (10万円)
 
 # ★ V7 (Sniper Strategy) パラメータ
-# 勝率重視のため、少しフィルターを厳しくするが、ホームラン狙いは維持
-ATR_STOP_MULTIPLIER = 3.0      
+ATR_STOP_MULTIPLIER = 1.8      
 TRAILING_TRIGGER = 0.10        
 TRAILING_MULTIPLIER = 2.0      
 
@@ -124,18 +123,14 @@ def calculate_technical_indicators(df):
     loss = (-delta.where(delta < 0, 0)).rolling(9).mean()
     df['RSI9'] = 100 - (100 / (1 + gain/loss))
 
-    # ★追加 4. MACD (12, 26, 9)
+    # 4. MACD (12, 26, 9)
     exp12 = close.ewm(span=12, adjust=False).mean()
     exp26 = close.ewm(span=26, adjust=False).mean()
     df['MACD'] = exp12 - exp26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['Signal']
 
-    # ★追加 5. 一目均衡表 (雲のみ簡易計算)
-    # 転換線 = (過去9日間の高値 + 安値) / 2
-    # 基準線 = (過去26日間の高値 + 安値) / 2
-    # 先行スパンA = (転換線 + 基準線) / 2 (26日先に記入)
-    # 先行スパンB = (過去52日間の高値 + 安値) / 2 (26日先に記入)
+    # 5. 一目均衡表 (雲のみ)
     high9 = high.rolling(9).max(); low9 = low.rolling(9).min()
     tenkan = (high9 + low9) / 2
     high26 = high.rolling(26).max(); low26 = low.rolling(26).min()
@@ -146,7 +141,6 @@ def calculate_technical_indicators(df):
     senkou_b = ((high52 + low52) / 2).shift(26)
     
     df['Cloud_Top'] = pd.concat([senkou_a, senkou_b], axis=1).max(axis=1)
-    # 雲の下限は不要(雲の上かどうかだけ見るため)
 
     return df.dropna()
 
@@ -162,25 +156,30 @@ def calculate_metrics_for_training(df, idx):
     prev_width = float(df['BB_Width'].iloc[idx-5]) if df['BB_Width'].iloc[idx-5] > 0 else 0.1
     expansion_rate = bb_width / prev_width
     
+    # ★出来高推移の生成 (5日分)
+    # Vol_Ratio = Volume / Vol_MA20
+    vol_history = []
+    for i in range(4, -1, -1):
+        if idx-i >= 0:
+            row = df.iloc[idx-i]
+            vr = float(row['Volume']) / float(row['Vol_MA20']) if float(row['Vol_MA20']) > 0 else 0
+            vol_history.append(f"{vr:.1f}")
+    vol_history_str = "->".join(vol_history)
     vol_ratio = float(curr['Volume']) / float(curr['Vol_MA20']) if float(curr['Vol_MA20']) > 0 else 0
     
-    # ★追加指標の取得
     macd = float(curr['MACD'])
-    macd_signal = float(curr['Signal'])
     macd_hist = float(curr['MACD_Hist'])
     prev_hist = float(df['MACD_Hist'].iloc[idx-1])
     
-    # 雲との位置関係
     cloud_top = float(curr['Cloud_Top']) if not pd.isna(curr['Cloud_Top']) else 0
     price_vs_cloud = "Above" if price > cloud_top else "Below"
     
-    # ローソク足分析 (上ヒゲの長さ)
     open_p = float(curr['Open']); close_p = float(curr['Close']); high_p = float(curr['High']); low_p = float(curr['Low'])
     body_top = max(open_p, close_p)
     upper_shadow = high_p - body_top
     total_range = high_p - low_p
     shadow_ratio = upper_shadow / total_range if total_range > 0 else 0
-    candle_shape = "Good" if shadow_ratio < 0.3 else "Bad (Long Upper Shadow)" # 上ヒゲ30%以上は警戒
+    candle_shape = "Good" if shadow_ratio < 0.3 else "Bad (Long Upper Shadow)"
 
     return {
         'price': price,
@@ -191,15 +190,16 @@ def calculate_metrics_for_training(df, idx):
         'plus_di': float(curr['PlusDI']),
         'minus_di': float(curr['MinusDI']),
         'vol_ratio': vol_ratio,
+        'vol_history': vol_history_str, # ★追加
         'expansion_rate': expansion_rate,
         'atr_value': float(curr['ATR']),
-        # 新指標
         'macd_val': macd,
         'macd_hist': macd_hist,
         'macd_trend': "Expanding" if abs(macd_hist) > abs(prev_hist) else "Shrinking",
         'price_vs_cloud': price_vs_cloud,
         'candle_shape': candle_shape,
-        'rsi_9': float(curr['RSI9'])
+        'rsi_9': float(curr['RSI9']),
+        'rs_rating': 0
     }
 
 def check_iron_rules(metrics):
@@ -211,7 +211,6 @@ def check_iron_rules(metrics):
         return f"DangerZone({ma_dev:.1f}%)"
     if metrics['adx'] > 55: return "ADX Overheat"
     
-    # ★追加: 雲の下でのロングは禁止
     if metrics['price_vs_cloud'] == "Below": return "Below Ichimoku Cloud"
     
     return None
@@ -225,17 +224,15 @@ class CaseBasedMemory:
         self.scaler = StandardScaler()
         self.knn = None
         self.df = pd.DataFrame()
-        # 特徴量にMACDなどを追加しても良いが、今回は基本指標で検索
         self.feature_cols = ['adx', 'prev_adx', 'ma_deviation', 'vol_ratio', 'expansion_rate', 'dist_to_res']
         
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "target_price", 
             "Actual_High", "Target_Diff", "Target_Reach",
-            "Price", "adx", "prev_adx", "ma_deviation", 
+            "Price", "adx", "prev_adx", "ma_deviation", "rs_rating", 
             "vol_ratio", "expansion_rate", "dist_to_res", 
-            "macd_hist", "price_vs_cloud", # <--- 記録用に追加
-            "profit_rate"
+            "days_to_earnings", "margin_ratio", "profit_rate"
         ]
         self.load_and_train()
 
@@ -281,7 +278,10 @@ class CaseBasedMemory:
         new_df = pd.DataFrame([data_dict])
         for col in self.csv_columns:
             if col not in new_df.columns: new_df[col] = None
-        new_df = new_df[self.csv_columns]
+        # 不要なカラム（内部計算用）を除外して保存
+        save_cols = [c for c in self.csv_columns if c in new_df.columns]
+        new_df = new_df[save_cols]
+        
         try:
             if not os.path.exists(self.csv_path):
                 new_df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
@@ -304,7 +304,6 @@ def create_chart_image(df, name):
     ax1.plot(data.index, sma20 + 2*std20, color='green', alpha=0.5, linestyle='--', label='+2σ')
     ax1.plot(data.index, sma20 - 2*std20, color='green', alpha=0.5, linestyle='--', label='-2σ')
     
-    # 一目均衡表の雲を表示 (簡易)
     if 'Cloud_Top' in data.columns:
         ax1.plot(data.index, data['Cloud_Top'], color='blue', alpha=0.2, label='Cloud Top')
         ax1.fill_between(data.index, data['Cloud_Top'], data['Close'].min(), color='blue', alpha=0.05)
@@ -313,15 +312,13 @@ def create_chart_image(df, name):
     ax1.legend(); ax1.grid(True, alpha=0.3)
     ax2.bar(data.index, data['Volume'], color='gray', alpha=0.5)
     
-    # MACDをサブプロットに追加しても良いが、情報過多になるので今回は省略し数値で伝達
-    
     buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=80); plt.close(fig); buf.seek(0)
     return buf.getvalue()
 
 def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
     if metrics['adx'] < 20: return {"action": "HOLD", "reason": "ADX<20"}
     
-    # ★V7 スナイパー型プロンプト
+    # ★V7 改良プロンプト (Volume History追加)
     prompt = f"""
 ### ROLE
 あなたは「高精度スナイパー・トレンドフォローAI」です。
@@ -335,6 +332,7 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
 2. Direction: +DI({metrics['plus_di']:.1f}) vs -DI({metrics['minus_di']:.1f})
 3. Volatility: {metrics['expansion_rate']:.2f}倍 (スクイーズからの拡大が良い)
 4. Volume: {metrics['vol_ratio']:.2f}倍
+   - 推移(5日): {metrics['vol_history']}
 
 [★ダマシ回避・精密検査]
 1. **MACD**: Hist={metrics['macd_hist']:.2f} ({metrics['macd_trend']})
@@ -351,8 +349,7 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
 - **BUY条件**:
   1. 抵抗線を明確に超えている、または直前でMACD等のモメンタムが強い。
   2. 価格が「雲」の上にあること (必須)。
-  3. ローソク足に長い上ヒゲがないこと。
-  4. 出来高が伴っていること。
+  3. 出来高が伴って増加傾向にあること (Volume History参照)。
 
 - **HOLD条件**:
   - 上記のいずれかに懸念がある場合。特に「上ヒゲ」や「雲の下」は即HOLD。
@@ -362,7 +359,7 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
   "action": "BUY" or "HOLD",
   "confidence": 0-100,
   "stop_loss": "推奨する損切り価格（整数）",
-  "target_price": "推奨する利確目標価格（整数）",
+  "target_price": "推奨する利確目標株価（整数）",
   "reason": "判断理由(50文字以内)"
 }}
 """
@@ -381,8 +378,7 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
 # ==========================================
 def main():
     start_time = time.time()
-    print(f"=== AI強化合宿 [AGGRESSIVE V7] (Sniper Precision Mode) ===")
-    print(f"New Indicators: MACD, Ichimoku Cloud, Candle Shape")
+    print(f"=== AI強化合宿 [AGGRESSIVE V7] (Sniper Precision + Vol History) ===")
     
     memory_system = CaseBasedMemory(LOG_FILE) 
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
@@ -412,7 +408,6 @@ def main():
         target_idx = random.randint(100, len(df) - 65) 
         metrics = calculate_metrics_for_training(df, target_idx)
         
-        # 鉄の掟チェック (V7版: 雲の下も弾く)
         iron_rule = check_iron_rules(metrics)
         if iron_rule: continue
 
@@ -453,13 +448,11 @@ def main():
         for _, row in future_prices.iterrows():
             high = row['High']; low = row['Low']; close = row['Close']
             
-            # 1. 損切り判定
             if low <= current_stop_loss:
                 is_loss = True
                 final_exit_price = current_stop_loss
                 break
             
-            # 2. トレーリングストップ (ホームラン型)
             if high > max_price:
                 max_price = high
             
@@ -504,11 +497,12 @@ def main():
             'adx': metrics['adx'], 
             'prev_adx': metrics['prev_adx'],
             'ma_deviation': metrics['ma_deviation'], 
+            'rs_rating': 0, 
             'vol_ratio': metrics['vol_ratio'], 
             'expansion_rate': metrics['expansion_rate'],
             'dist_to_res': metrics['dist_to_res'], 
-            'macd_hist': metrics['macd_hist'], # <--- 追加
-            'price_vs_cloud': metrics['price_vs_cloud'], # <--- 追加
+            'days_to_earnings': 999, 
+            'margin_ratio': 1.0, 
             'profit_rate': profit_rate 
         }
         memory_system.save_experience(save_data)
