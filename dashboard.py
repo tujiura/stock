@@ -10,8 +10,8 @@ import os
 # ファイルパス定義
 FILES = {
     "🛡️ 資産防衛型 (Risk Managed)": "ai_trade_memory_risk_managed.csv",
-    "🚀 攻撃型 (Aggressive V2)": "ai_trade_memory_aggressive_v6.csv",
-    "最新版": "ai_trade_memory_aggressive_v5.csv"
+    "🚀 攻撃型 (Aggressive V2)": "ai_trade_memory_aggressive_v5.csv",
+    "最新版": "ai_trade_memory_aggressive_v6.csv"
 }
 
 PAGE_TITLE = "📊 AI Trade Analysis Dashboard"
