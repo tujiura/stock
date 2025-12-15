@@ -51,7 +51,7 @@ genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
 # ★ファイル設定 (攻撃型V7)
 LOG_FILE = "ai_trade_memory_aggressive_v7.csv" 
 REAL_TRADE_LOG_FILE = "real_trade_record_aggressive.csv" 
-MODEL_NAME = 'models/gemini-2.0-flash'
+MODEL_NAME = 'models/gemini-3-pro-preview'
 
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
@@ -401,55 +401,69 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, macro, news, weekly
     
     # ★V7 スナイパー型プロンプト (Vol History入り)
     prompt = f"""
-### ROLE
-あなたは「高精度スナイパー・トレンドフォローAI」です。
-ダマシ(False Breakout)を極限まで回避し、本物のトレンド初動のみを狙撃します。
+# ROLE
+あなたは世界最高峰の「クオンツ・テクニカルアナリスト」であり、高精度のトレンドフォロー戦略を実行するAIエージェントです。
+あなたの使命は、提供されたデータに基づき、感情を排して数学的かつ論理的にトレード判断を下すことです。
+特に「ダマシ（False Breakout）」を回避し、優位性（Edge）のあるエントリーポイントのみを厳選します。
 
-### INPUT DATA
-銘柄: {ticker} (現在価格: {metrics['price']:.0f}円)
+# CONTEXT & OBJECTIVE
+ユーザーは、以下の銘柄について「買い（BUY）」か「見送り（HOLD）」かの二択の判断を求めています。
+曖昧な状況や、リスクリワード比が悪い局面では、資産を守るために迷わず「HOLD」を選択する必要があります。
 
-[基本指標]
-1. Trend (ADX): {metrics['adx']:.1f} (閾値25以上)
-2. Direction: +DI({metrics['plus_di']:.1f}) vs -DI({metrics['minus_di']:.1f})
-3. Volatility: {metrics['expansion_rate']:.2f}倍 (スクイーズからの拡大が良い)
-4. Volume: {metrics['vol_ratio']:.2f}倍
-   - 推移: {metrics['vol_history']}
+# INPUT DATA
+## 対象銘柄
+* Ticker: {ticker}
+* Current Price: {metrics['price']:.0f} JPY
 
-[★ダマシ回避・精密検査]
-1. **MACD**: Hist={metrics['macd_hist']:.2f} ({metrics['macd_trend']})
-   - ヒストグラムがプラス圏で拡大中なら強い。マイナスなら警戒。
-2. **Ichimoku Cloud**: Price is {metrics['price_vs_cloud']} the Cloud.
-   - 雲の下(Below)での買いは自殺行為のため禁止。
-3. **Candle Shape**: {metrics['candle_shape']}
-   - 長い上ヒゲ(Bad)は売り圧力の証明。大陽線(Good)が理想。
-4. **Resistance**: 距離 {metrics['dist_to_res']:.1f}%
+## 1. Technical Indicators (Quantitative)
+* **Trend Strength ($ADX$):** {metrics['adx']:.1f} (Threshold: $\ge 25$)
+* **Directional Movement:** $+DI$ = {metrics['plus_di']:.1f} vs $-DI$ = {metrics['minus_di']:.1f}
+* **Volatility Expansion:** {metrics['expansion_rate']:.2f}x (Squeeze $\\to$ Expansion is ideal)
+* **Volume Ratio:** {metrics['vol_ratio']:.2f}x (Trend: {metrics['vol_history']})
+* **MACD:** Histogram = {metrics['macd_hist']:.2f} ({metrics['macd_trend']})
+* **Ichimoku Cloud:** Price is **{metrics['price_vs_cloud']}** the Cloud.
+* **Resistance Distance:** {metrics['dist_to_res']:.1f}%
 
-[環境]
-- 決算: {fund_data['days_to_earnings']}日後
-- 週足: {weekly}
-- セクター: {sector_trend_desc}
+## 2. Qualitative Factors (Price Action & Environment)
+* **Candle Shape:** {metrics['candle_shape']}
+* **Sector Trend:** {sector_trend_desc}
+* **Weekly Trend:** {weekly}
+* **Earnings Date:** {fund_data['days_to_earnings']} days later
 
+## 3. External Factors
 {macro}
 {news}
 {cbr_text}
 
-### EVALUATION LOGIC
-- **BUY条件**:
-  1. 抵抗線を明確に超えている、または直前でMACD等のモメンタムが強い。
-  2. 価格が「雲」の上にあること (必須)。
-  3. 出来高が伴って増加傾向にあること。
+# STRICT EVALUATION RULES (AND/OR LOGIC)
+判断を下す際は、以下の論理ゲートを厳守してください。
 
-- **HOLD条件**:
-  - 上記のいずれかに懸念がある場合。特に「上ヒゲ」や「雲の下」は即HOLD。
+1.  **Trend Filter (Must Pass):**
+    * 価格が「一目均衡表の雲」の上にあること（$Price > Cloud$）。これが満たされない場合、**即座にHOLD**とする。
+    * トレンドの強さ（$ADX$）が基準を満たしている、または勢いが増していること。
 
-### OUTPUT REQUIREMENT (JSON ONLY)
+2.  **Momentum Trigger:**
+    * MACDヒストグラムが拡大傾向、かつプラス圏にあることが望ましい。
+    * 出来高（Volume）が増加傾向にあり、値動きを裏付けていること。
+
+3.  **Risk Check:**
+    * 長い上ヒゲ（Selling Pressure）が出現していないか？
+    * 決算発表が直近（3日以内など）に迫っていないか？
+    * 抵抗線（Resistance）が極端に近くないか？
+
+# OUTPUT FORMAT
+回答は**JSON形式のみ**で出力してください。Markdownのコードブロックや説明文は一切不要です。
+
 {{
   "action": "BUY" or "HOLD",
-  "confidence": 0-100,
-  "stop_loss": "推奨する損切り価格（整数）",
-  "target_price": "推奨する利確目標価格（整数）",
-  "reason": "判断理由(50文字以内)"
+  "confidence": 0-100 (Integer),
+  "stop_loss": {metrics['price'] * 0.95:.0f},  // 例: 現在価格から計算、またはロジックで算出
+  "target_price": {metrics['price'] * 1.10:.0f}, // 例: リスクリワード1:2などを想定
+  "reason": "判断の決定的な理由を簡潔に記述 (Max 60 chars)"
 }}
+
+# FINAL INSTRUCTION
+情け容赦ないプロの視点で分析し、JSONデータのみを返してください。
 """
     safety = {HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
     try:
