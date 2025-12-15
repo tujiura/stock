@@ -34,21 +34,26 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
 
-# ★ファイル名をV5に変更 (ターゲット分析用)
-LOG_FILE = "ai_trade_memory_aggressive_v5.csv" 
+# ★ファイル名をV5_OPTに変更 (最適化版学習データ)
+LOG_FILE = "ai_trade_memory_aggressive_v6.csv" 
 MODEL_NAME = 'models/gemini-2.0-flash'
 
-TRAINING_ROUNDS = 500
+TRAINING_ROUNDS = 1500  # トレーニング回数
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
 TRADE_BUDGET = 1000000 
 
-# 設定
-ATR_MULTIPLIER = 1.8         
+# ★ V5改 (Optimization) ロジックパラメータ
+ATR_STOP_MULTIPLIER = 2.5      # 初期損切り幅
+PARTIAL_PROFIT_TARGET = 0.035  # 分割利確ライン (+5%)
+PARTIAL_EXIT_RATIO = 0.5       # 分割利確割合 (50%)
+TRAILING_WIDE_MULTIPLIER = 2.5 # 分割後の追従幅 (広げる)
+
+# 鉄の掟用
 MA_DEV_DANGER_LOW = 10.0     
 MA_DEV_DANGER_HIGH = 15.0    
 
-# トレーニングリスト
+# トレーニング対象リスト
 TRAINING_LIST = [
     "6254.T", "8035.T", "2768.T", "6305.T", "6146.T",
     "6920.T", "6857.T", "7735.T", "6723.T", "6963.T", "3436.T", "6526.T", "6315.T",
@@ -127,8 +132,8 @@ def calculate_metrics_for_training(df, idx):
     curr = df.iloc[idx]
     price = float(curr['Close'])
     
-    past_15 = df.iloc[idx-15:idx]
-    recent_high = past_15['High'].max()
+    past_60 = df.iloc[idx-60:idx]
+    recent_high = past_60['High'].max()
     dist_to_res = ((price - recent_high) / recent_high) * 100 if recent_high > 0 else 0
     
     adx = float(curr['ADX'])
@@ -164,10 +169,13 @@ def calculate_metrics_for_training(df, idx):
 def check_iron_rules(metrics):
     if metrics['adx'] < 20: return "ADX<20"
     if metrics['vol_ratio'] < 0.8: return "Vol<0.8"
+    
     ma_dev = metrics['ma_deviation']
     if MA_DEV_DANGER_LOW <= ma_dev <= MA_DEV_DANGER_HIGH: 
         return f"DangerZone({ma_dev:.1f}%)"
+    
     if metrics['adx'] > 55: return "ADX Overheat"
+    
     return None
 
 # ==========================================
@@ -181,11 +189,11 @@ class CaseBasedMemory:
         self.df = pd.DataFrame()
         self.feature_cols = ['adx', 'prev_adx', 'ma_deviation', 'vol_ratio', 'expansion_rate', 'dist_to_res']
         
-        # ★保存カラム (Actual_High, Target_Diff 追加)
+        # ★保存カラム (Actual_High, Target_Diff, Profit_Rateなど)
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "target_price", 
-            "Actual_High", "Target_Diff", "Target_Reach", # <--- 追加: 分析用
+            "Actual_High", "Target_Diff", "Target_Reach",
             "Price", "adx", "prev_adx", "ma_deviation", "rs_rating", 
             "vol_ratio", "expansion_rate", "dist_to_res", "days_to_earnings", 
             "margin_ratio", "profit_rate"
@@ -314,11 +322,12 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
         return {"action": "HOLD", "reason": "AI Error", "confidence": 0}
 
 # ==========================================
-# 4. メイン実行 (トレーニングモード)
+# 4. メイン実行 (トレーニングモード: V5改シミュレーション)
 # ==========================================
 def main():
     start_time = time.time()
-    print(f"=== AI強化合宿 [AGGRESSIVE V5] (Target Analysis) ===")
+    print(f"=== AI強化合宿 [AGGRESSIVE V5 OPT] (Split Exit Training) ===")
+    print(f"Strategy: Half Profit @ +{PARTIAL_PROFIT_TARGET*100}% / Trail ATRx{TRAILING_WIDE_MULTIPLIER}")
     
     memory_system = CaseBasedMemory(LOG_FILE) 
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
@@ -337,7 +346,6 @@ def main():
     print(f"データ取得完了 ({int(time.time() - start_time)}秒)")
 
     win_count = 0; loss_count = 0
-    total_profit_loss = 0.0 
     
     print(f"\n🥊 トレーニング開始 ({TRAINING_ROUNDS}ラウンド)\n")
     
@@ -349,6 +357,10 @@ def main():
         target_idx = random.randint(100, len(df) - 65) 
         metrics = calculate_metrics_for_training(df, target_idx)
         
+        # 鉄の掟チェック
+        iron_rule = check_iron_rules(metrics)
+        if iron_rule: continue
+
         cbr_text = memory_system.search_similar_cases(metrics)
         past_df = df.iloc[:target_idx+1]
         chart_bytes = create_chart_image(past_df, ticker)
@@ -364,68 +376,94 @@ def main():
         entry_price = float(metrics['price'])
         atr = metrics['atr_value']
         
-        # 損切り・目標設定
+        # AI損切り・ターゲット
         ai_stop = decision.get('stop_loss', 0)
         ai_target = decision.get('target_price', 0)
         try: ai_stop = int(ai_stop); ai_target = int(ai_target)
         except: ai_stop = 0; ai_target = 0
         
-        current_stop_loss = ai_stop if ai_stop > 0 else entry_price - (atr * 1.8)
+        current_stop_loss = ai_stop if ai_stop > 0 else entry_price - (atr * ATR_STOP_MULTIPLIER)
         
-        shares = int(TRADE_BUDGET // entry_price)
-        if shares < 1: shares = 1
+        # シミュレーション用設定
+        initial_shares = int(TRADE_BUDGET // entry_price)
+        if initial_shares < 1: initial_shares = 1
+        
+        shares = initial_shares
+        realized_profit = 0.0
+        partial_exit_done = False
         
         future_prices = df.iloc[target_idx+1 : target_idx+61]
-        result = "DRAW"; profit_loss = 0.0; final_exit_price = entry_price
+        result = "DRAW"
+        final_exit_price = entry_price
         max_price = entry_price
         is_loss = False
         
-        # ★追加: 期間中の最高値を記録 (Actual High)
         actual_high = future_prices['High'].max()
         
+        # --- 未来データ走査 ---
         for _, row in future_prices.iterrows():
-            high = row['High']; low = row['Low']; close = row['Close']
+            high = row['High']; low = row['Low']; open_p = row['Open']
             
-            # 損切り
+            # 1. 損切り判定
             if low <= current_stop_loss:
+                exec_price = current_stop_loss
+                if open_p < current_stop_loss: exec_price = open_p
+                
+                loss_amount = (exec_price - entry_price) * shares
+                realized_profit += loss_amount
                 is_loss = True
-                final_exit_price = current_stop_loss
                 break
             
-            # トレーリングストップ
+            # 2. 分割利確判定
+            target_price_partial = entry_price * (1 + PARTIAL_PROFIT_TARGET)
+            
+            if not partial_exit_done and high >= target_price_partial:
+                exec_price = target_price_partial
+                if open_p > target_price_partial: exec_price = open_p
+                
+                exit_shares = int(shares * PARTIAL_EXIT_RATIO)
+                if exit_shares > 0:
+                    profit_amount = (exec_price - entry_price) * exit_shares
+                    realized_profit += profit_amount
+                    shares -= exit_shares
+                    partial_exit_done = True
+
+            # 3. トレーリングストップ
             if high > max_price:
                 max_price = high
-                profit_pct = (max_price - entry_price) / entry_price
-                
-                trail_dist = atr * 1.8 
-                if profit_pct > 0.05: trail_dist = atr * 1.0
-                new_stop = max_price - trail_dist
-                if profit_pct > 0.02:
-                    new_stop = max(new_stop, entry_price * 1.002)
-                if new_stop > current_stop_loss:
-                    current_stop_loss = new_stop
+            
+            current_multiplier = TRAILING_WIDE_MULTIPLIER if partial_exit_done else ATR_STOP_MULTIPLIER
+            trail_dist = atr * current_multiplier
+            new_stop = max_price - trail_dist
+            
+            profit_pct_max = (max_price - entry_price) / entry_price
+            if partial_exit_done or profit_pct_max > 0.03:
+                 new_stop = max(new_stop, entry_price * 1.002)
+            
+            if new_stop > current_stop_loss:
+                current_stop_loss = new_stop
 
-        if not is_loss:
+        # 期間終了後の強制決済
+        if not is_loss and shares > 0:
             final_exit_price = future_prices['Close'].iloc[-1]
+            profit_amount = (final_exit_price - entry_price) * shares
+            realized_profit += profit_amount
 
-        profit_loss = (final_exit_price - entry_price) * shares
-        profit_rate = ((final_exit_price - entry_price) / entry_price) * 100
+        # 結果判定
+        if realized_profit > 0: result = "WIN"; win_count += 1
+        elif realized_profit < 0: result = "LOSS"; loss_count += 1
         
-        if profit_loss > 0: result = "WIN"; win_count += 1
-        elif profit_loss < 0: result = "LOSS"; loss_count += 1
+        initial_invest = entry_price * initial_shares
+        profit_rate = (realized_profit / initial_invest) * 100
 
-        print(f"   結果: {result} (PL: {profit_loss:+.0f}円 / {profit_rate:+.2f}%) Tgt:{ai_target} Actual:{actual_high:.0f}")
+        print(f"   結果: {result} (PL: {realized_profit:+.0f}円 / {profit_rate:+.2f}%) Tgt:{ai_target}")
 
-        # ★追加計算: ターゲットとの差分
-        target_diff = 0
+        target_diff = actual_high - ai_target if ai_target > 0 else 0
         target_reach = 0
         if ai_target > 0:
-            target_diff = actual_high - ai_target
-            # 到達率 (上昇幅に対する達成度)
-            upside_potential = ai_target - entry_price
-            actual_upside = actual_high - entry_price
-            if upside_potential > 0:
-                target_reach = (actual_upside / upside_potential) * 100
+            upside = ai_target - entry_price
+            act_up = actual_high - entry_price
+            if upside > 0: target_reach = (act_up / upside) * 100
 
         save_data = {
             'Date': df.index[target_idx].strftime('%Y-%m-%d'), 
@@ -435,11 +473,7 @@ def main():
             'Confidence': conf, 
             'stop_loss_price': current_stop_loss, 
             'target_price': ai_target, 
-            # ★新規項目
-            'Actual_High': actual_high,
-            'Target_Diff': target_diff,
-            'Target_Reach': target_reach,
-            
+            'Actual_High': actual_high, 'Target_Diff': target_diff, 'Target_Reach': target_reach,
             'Price': metrics['price'], 
             'adx': metrics['adx'], 
             'prev_adx': metrics['prev_adx'],
@@ -458,7 +492,6 @@ def main():
     elapsed_time = time.time() - start_time
     print(f"\n=== 合宿終了 ({str(datetime.timedelta(seconds=int(elapsed_time)))}) ===")
     print(f"戦績 (BUY): {win_count}勝 {loss_count}敗")
-    print(f"合計損益: {total_profit_loss:+.0f}円")
 
 if __name__ == "__main__":
     main()

@@ -15,21 +15,25 @@ import re
 import logging
 
 # ==========================================
-# ★設定エリア: バックテスト最終版 (V4 Params)
+# ★設定エリア: V5改 (分割決済 & トレーリング緩和) バックテスト
 # ==========================================
 START_DATE = "2023-01-01"
 END_DATE   = "2025-11-30"
 
-# ★修正: 1000万円スタート (日本株の単元100株を買うには10万円では不足するため)
-INITIAL_CAPITAL = 100000
-
-RISK_PER_TRADE = 0.20      # リスク許容率 (1トレードあたり資金の20%)
+INITIAL_CAPITAL = 100000 # 10万円スタート
+RISK_PER_TRADE = 0.40      # リスク許容率
 MAX_POSITIONS = 10         # 最大保有銘柄数
-MAX_INVEST_RATIO = 0.2     # 1銘柄への集中投資制限 (20%まで)
+MAX_INVEST_RATIO = 0.5     # 1銘柄への集中投資制限 (20%まで)
+
+# ★ V5改 (Optimization) ロジックパラメータ
+ATR_STOP_MULTIPLIER = 1.8      # 初期損切り幅 (ATR x 1.8)
+PARTIAL_PROFIT_TARGET = 0.035   # 分割利確ライン (+3.5%)
+PARTIAL_EXIT_RATIO = 0.5       # 分割利確割合 (50%)
+TRAILING_WIDE_MULTIPLIER = 2.5 # 分割後の追従幅 (ATR x 2.5 に広げる)
 
 # 保存ファイル名
-LOG_FILE = "ai_trade_memory_aggressive.csv" 
-HISTORY_CSV = "backtest_history_log.csv" 
+LOG_FILE = "ai_trade_memory_aggressive_v5_opt.csv" 
+HISTORY_CSV = "backtest_history_v5_opt.csv" 
 
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
@@ -81,7 +85,6 @@ def download_data_safe(ticker, period="5y", interval="1d", retries=3):
     for attempt in range(retries):
         try:
             logging.getLogger('yfinance').setLevel(logging.CRITICAL)
-            # auto_adjust=True で警告回避
             df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
             if df.empty: return None
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
@@ -135,8 +138,7 @@ def calculate_metrics_at_date(df, idx):
     curr = df.iloc[idx]
     price = float(curr['Close'])
     
-    past_60 = df.iloc[idx-60:idx]
-    recent_high = past_60['High'].max()
+    recent_high = df['High'].iloc[idx-60:idx].max()
     dist_to_res = ((price - recent_high) / recent_high) * 100 if recent_high > 0 else 0
     
     adx = float(curr['ADX'])
@@ -173,14 +175,11 @@ def calculate_metrics_at_date(df, idx):
 # 2. 鉄の掟 & 補助関数
 # ==========================================
 def check_iron_rules(metrics):
-    # 1. ADX (トレンドなし)
     if metrics['adx'] < 20: return "ADX<20"
-    # 2. 出来高 (閑散)
     if metrics['vol_ratio'] < 0.8: return "Vol<0.8"
-    # 3. 魔の乖離ゾーン (MA乖離 +10%~15%は調整警戒)
+    
     ma_dev = metrics['ma_deviation']
     if 10.0 <= ma_dev <= 15.0: return f"DangerZone({ma_dev:.1f}%)"
-    # 4. ADX過熱
     if metrics['adx'] > 55: return "ADX Overheat"
     return None
 
@@ -233,7 +232,7 @@ class MemorySystem:
                     
                     features = valid_df[self.feature_cols].fillna(0)
                     self.features_normalized = self.scaler.fit_transform(features)
-                    self.valid_df_for_knn = valid_df
+                    self.valid_df_for_knn = valid_df 
                     global CBR_NEIGHBORS_COUNT
                     self.knn = NearestNeighbors(n_neighbors=min(CBR_NEIGHBORS_COUNT, len(valid_df)), metric='euclidean')
                     self.knn.fit(self.features_normalized)
@@ -244,7 +243,7 @@ class MemorySystem:
         vec = [current_metrics.get(col, 0) for col in self.feature_cols]
         input_df = pd.DataFrame([vec], columns=self.feature_cols)
         dists, indices = self.knn.kneighbors(self.scaler.transform(input_df))
-
+        
         text = f"【類似局面(過去)】\n"
         win_c = 0; loss_c = 0
         for idx in indices[0]:
@@ -252,7 +251,7 @@ class MemorySystem:
             res = str(row.get('result', ''))
             if res == 'WIN': win_c += 1
             if res == 'LOSS': loss_c += 1
-
+        
         rate = win_c / (win_c + loss_c) * 100 if (win_c + loss_c) > 0 else 0
         text += f"-> 勝率: {rate:.0f}% (勝{win_c}/負{loss_c})\n"
         return text
@@ -283,8 +282,7 @@ def run_analyst(model, ticker, metrics, chart_bytes, cbr_text):
 ### EVALUATION LOGIC
 1. **ブレイクアウト判定**:
    - 抵抗線(resistance_price)を価格が上回っている、または抵抗線での攻防を制しつつあるか？
-   - 抵抗線の直前(差が0〜1%程度)で止まっている場合は "HOLD" (反落リスク)。
-   - 抵抗線を超えていれば "BUY" の確度アップ。
+   - 抵抗線を明確に超えていれば "BUY" の確度アップ。
    
 2. **過熱感チェック**:
    - MA乖離率(ma_deviation)が +30% を超えている場合は "HOLD" (高値掴み警戒)。
@@ -301,7 +299,6 @@ def run_analyst(model, ticker, metrics, chart_bytes, cbr_text):
 
 def run_commander_batch(model, candidates_data, current_cash, current_portfolio_text):
     candidates_text = ""
-    # 投資額上限 (20%ルール)
     max_invest_amount = current_cash * MAX_INVEST_RATIO 
     
     for c in candidates_data:
@@ -323,7 +320,7 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
     prompt = f"""
 あなたは冷徹な運用指令官（ファンドマネージャー）です。
 分析官から上がってきた有望銘柄のレポートと、現在の資金・ポートフォリオ状況を総合的に判断し、ベストな買い注文を決定してください。
-１株単位で購入可能です。
+
 ### 現在の状況
 - 手元資金: {current_cash:,.0f}円
 - 保有銘柄: {current_portfolio_text}
@@ -348,7 +345,7 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
       "ticker": "銘柄コード",
       "action": "BUY",
       "shares": 購入株数 (整数),
-      "stop_loss": 損切り価格 (数値のみ。例: 1500),
+      "stop_loss": 損切り価格 (数値のみ),
       "reason": "選定理由を50文字以内で"
     }}
   ]
@@ -366,8 +363,9 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
 # 5. メイン実行
 # ==========================================
 def main():
-    print(f"=== 🧪 酸性試験 (Final Ver: Fixed) ({START_DATE} ~ {END_DATE}) ===")
-    print(f"初期資金: {INITIAL_CAPITAL:,.0f}円 | ロジック: Aggressive V4")
+    print(f"=== 🧪 酸性試験 (V5改: Partial Exit & Wide Trail) ({START_DATE} ~ {END_DATE}) ===")
+    print(f"初期資金: {INITIAL_CAPITAL:,.0f}円 | 損切: ATRx{ATR_STOP_MULTIPLIER}")
+    print(f"利確設定: +{PARTIAL_PROFIT_TARGET*100:.0f}%で{PARTIAL_EXIT_RATIO*100:.0f}%利確 -> 残りATRx{TRAILING_WIDE_MULTIPLIER}追従")
 
     memory = MemorySystem(LOG_FILE)
     try:
@@ -396,7 +394,7 @@ def main():
         return
 
     cash = INITIAL_CAPITAL
-    portfolio = {}
+    portfolio = {} # {ticker: {buy_price, shares, sl_price, max_price, atr, partial_exit_done}}
     trade_history = []
     equity_curve = []
     daily_history = []
@@ -415,13 +413,13 @@ def main():
             day_data = df.loc[current_date]
             day_low = float(day_data['Low'])
             day_high = float(day_data['High'])
-
-            # ★修正箇所: 損切り価格の安全な比較 (float vs float)
+            day_open = float(day_data['Open'])
+            
+            # --- 1. 損切り判定 (Stop Loss) ---
             current_sl = float(pos['sl_price'])
-
             if day_low <= current_sl:
                 exec_price = current_sl
-                if float(day_data['Open']) < current_sl: exec_price = float(day_data['Open'])
+                if day_open < current_sl: exec_price = day_open # ギャップダウン対応
 
                 proceeds = exec_price * pos['shares']
                 cash += proceeds
@@ -434,23 +432,47 @@ def main():
                 closed_tickers.append(ticker)
                 continue
 
-            # トレーリング更新 (Aggressive V4)
+            # --- 2. 分割利確判定 (Partial Profit Taking) ---
+            if not pos.get('partial_exit_done', False):
+                target_price_partial = pos['buy_price'] * (1 + PARTIAL_PROFIT_TARGET)
+                
+                if day_high >= target_price_partial:
+                    exec_price = day_open if day_open > target_price_partial else target_price_partial
+                    
+                    sell_shares = int(pos['shares'] * PARTIAL_EXIT_RATIO)
+                    if sell_shares > 0:
+                        proceeds = exec_price * sell_shares
+                        cash += proceeds
+                        profit = proceeds - (pos['buy_price'] * sell_shares)
+                        profit_rate = (exec_price - pos['buy_price']) / pos['buy_price'] * 100
+                        
+                        pos['shares'] -= sell_shares
+                        pos['partial_exit_done'] = True
+                        
+                        print(f"\n[{date_str}] 💰 分割利確 {ticker}: {sell_shares}株 @ {exec_price:.0f}円 ({profit_rate:+.2f}%) 残:{pos['shares']}株")
+                        trade_history.append({'Result': 'WIN', 'PL': profit, 'Type': 'Partial'})
+
+            # --- 3. トレーリングストップ更新 (Trailing Stop) ---
             if day_high > pos['max_price']:
                 pos['max_price'] = day_high
-                profit_pct = (pos['max_price'] - pos['buy_price']) / pos['buy_price']
-
-                width = pos['atr'] * 1.8 
-                if profit_pct > 0.05: width = pos['atr'] * 1.0 
-
-                new_sl = pos['max_price'] - width
-                if profit_pct > 0.02: new_sl = max(new_sl, pos['buy_price'] * 1.002) 
-
-                if new_sl > pos['sl_price']: pos['sl_price'] = new_sl
+            
+            # 分割利確済みなら ATR x 2.5 (ゆったり)、未なら ATR x 1.8 (標準)
+            current_multiplier = TRAILING_WIDE_MULTIPLIER if pos.get('partial_exit_done', False) else ATR_STOP_MULTIPLIER
+            
+            trail_dist = pos['atr'] * current_multiplier
+            new_sl = pos['max_price'] - trail_dist
+            
+            # 建値保証 (+3%以上伸びたら)
+            profit_pct_max = (pos['max_price'] - pos['buy_price']) / pos['buy_price']
+            if pos.get('partial_exit_done', False) or profit_pct_max > 0.03:
+                 new_sl = max(new_sl, pos['buy_price'] * 1.002)
+            
+            if new_sl > pos['sl_price']:
+                pos['sl_price'] = new_sl
 
         for t in closed_tickers: del portfolio[t]
 
         # --- B. バッチ新規エントリー ---
-        # ★修正: 資金制限を緩和 (1万円以上あればトライ)
         if len(portfolio) < MAX_POSITIONS and cash > 10000:
             candidates_data = []
 
@@ -483,7 +505,6 @@ def main():
                 for order in decision_data.get('orders', []):
                     tic = order.get('ticker')
                     
-                    # ★修正箇所: 株数と損切り価格の安全な取得と型変換
                     try:
                         raw_shares = order.get('shares', 0)
                         if isinstance(raw_shares, str): raw_shares = float(raw_shares.replace(',', ''))
@@ -496,12 +517,10 @@ def main():
                             metrics = target['metrics']
                             cost = shares * metrics['price']
                             
-                            # 資金チェック
                             if cost <= cash:
                                 cash -= cost
                                 atr_val = metrics['atr_value']
                                 
-                                # 損切り価格のパース (文字列 "1,500" 等に対応)
                                 try:
                                     raw_sl = order.get('stop_loss')
                                     if isinstance(raw_sl, str): raw_sl = float(raw_sl.replace(',', ''))
@@ -509,17 +528,18 @@ def main():
                                     if raw_sl and float(raw_sl) > 0:
                                         initial_sl = float(raw_sl)
                                     else:
-                                        initial_sl = metrics['price'] - atr_val * 1.8
+                                        initial_sl = metrics['price'] - atr_val * ATR_STOP_MULTIPLIER
                                 except:
-                                    initial_sl = metrics['price'] - atr_val * 1.8
+                                    initial_sl = metrics['price'] - atr_val * ATR_STOP_MULTIPLIER
                                 
                                 portfolio[tic] = {
                                     'buy_price': metrics['price'], 'shares': shares,
-                                    'sl_price': initial_sl, 'max_price': metrics['price'], 'atr': atr_val
+                                    'sl_price': initial_sl, 'max_price': metrics['price'], 'atr': atr_val,
+                                    'partial_exit_done': False # フラグ初期化
                                 }
                                 print(f"\n[{date_str}] 🔴 新規 {tic}: {shares}株 (約{cost:,.0f}円)")
 
-        # --- C. 資産集計 & ログ保存 ---
+        # --- C. 資産集計 ---
         current_equity = cash
         holdings_val = 0
         holdings_detail = []
