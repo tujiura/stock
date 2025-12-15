@@ -9,7 +9,7 @@ import os
 # ==========================================
 # ファイルパス定義 (V6を追加)
 FILES = {
-    "🚀 攻撃型 V6 (最新: 目標到達分析)": "ai_trade_memory_aggressive_v6.csv",
+    "🚀 攻撃型 V6 (最新: 目標到達分析)": "ai_trade_memory_aggressive_v7.csv",
     "🔥 攻撃型 V5 (分割決済)": "ai_trade_memory_aggressive_v5.csv",
     "🛡️ 資産防衛型 (Risk Managed)": "ai_trade_memory_risk_managed.csv",
 }
