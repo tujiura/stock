@@ -99,12 +99,12 @@ def main():
     total_profit = df_finished['profit_loss'].sum()
     pf = wins['profit_loss'].sum() / abs(losses['profit_loss'].sum()) if not losses.empty else float('inf')
 
-    # 目標到達率
-    target_reach_str = "-"
+    # ★修正箇所: 変数名を統一しました
+    target_reach_kpi = "-" 
     if 'Target_Reach' in df.columns:
         reached = df_finished[df_finished['Target_Reach'] >= 100]
         rate = len(reached) / total_trades * 100 if total_trades > 0 else 0
-        target_reach_str = f"{rate:.1f}%"
+        target_reach_kpi = f"{rate:.1f}%"
 
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("総トレード", f"{total_trades}")
