@@ -15,7 +15,7 @@ import re
 import logging
 
 # ==========================================
-# ★設定エリア: V6改 (ホームラン狙い: 損小利大特化)
+# ★設定エリア: V7 (Sniper & Home Run) バックテスト
 # ==========================================
 START_DATE = "2023-01-01"
 END_DATE   = "2025-11-30"
@@ -25,14 +25,18 @@ RISK_PER_TRADE = 0.20
 MAX_POSITIONS = 10         
 MAX_INVEST_RATIO = 0.2     
 
-# ★ V6改 (Home Run Strategy) ロジックパラメータ
+# ★ V7 ロジックパラメータ
 ATR_STOP_MULTIPLIER = 1.8      # 初期損切り幅 (ATR x 1.8)
 TRAILING_TRIGGER = 0.10        # トレーリング開始ライン (+10%までは耐える)
 TRAILING_MULTIPLIER = 2.0      # トレーリング追従幅 (ATR x 2.0)
 
+# 鉄の掟
+MA_DEV_DANGER_LOW = 10.0     
+MA_DEV_DANGER_HIGH = 15.0    
+
 # 保存ファイル名
-LOG_FILE = "ai_trade_memory_aggressive_v6.csv" 
-HISTORY_CSV = "backtest_history_v6_homerun.csv" 
+LOG_FILE = "ai_trade_memory_aggressive_v7.csv" 
+HISTORY_CSV = "backtest_history_v7.csv" 
 
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
@@ -77,7 +81,7 @@ else:
     genai.configure(api_key=GOOGLE_API_KEY)
 
 # ==========================================
-# 1. データ取得 & テクニカル計算
+# 1. データ取得 & テクニカル計算 (V7仕様)
 # ==========================================
 def download_data_safe(ticker, period="5y", interval="1d", retries=3): 
     wait = 2
@@ -95,9 +99,12 @@ def download_data_safe(ticker, period="5y", interval="1d", retries=3):
 
 def calculate_technical_indicators(df):
     df = df.copy()
-    df['SMA25'] = df['Close'].rolling(25).mean()
+    close = df['Close']; high = df['High']; low = df['Low']
     
-    high = df['High']; low = df['Low']; close = df['Close']
+    # 基本指標
+    df['SMA25'] = close.rolling(25).mean()
+    
+    # 1. DMI/ADX
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
     tr3 = abs(low - close.shift(1))
@@ -109,27 +116,42 @@ def calculate_technical_indicators(df):
     minus_dm = minus_dm.where((minus_dm > 0) & (minus_dm > plus_dm), 0)
 
     tr_smooth = tr.rolling(14).mean()
-    plus_dm_smooth = plus_dm.rolling(14).mean()
-    minus_dm_smooth = minus_dm.rolling(14).mean()
-
-    plus_di = 100 * (plus_dm_smooth / tr_smooth)
-    minus_di = 100 * (minus_dm_smooth / tr_smooth)
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    df['PlusDI'] = 100 * (plus_dm.rolling(14).mean() / tr_smooth)
+    df['MinusDI'] = 100 * (minus_dm.rolling(14).mean() / tr_smooth)
+    dx = (abs(df['PlusDI'] - df['MinusDI']) / (df['PlusDI'] + df['MinusDI'])) * 100
     df['ADX'] = dx.rolling(14).mean()
-    df['PlusDI'] = plus_di
-    df['MinusDI'] = minus_di
+    df['ATR'] = tr.rolling(14).mean()
 
-    sma20 = df['Close'].rolling(20).mean()
-    std20 = df['Close'].rolling(20).std()
+    # 2. Bollinger Bands
+    sma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
     df['BB_Width'] = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100
     df['Vol_MA20'] = df['Volume'].rolling(20).mean()
-    df['ATR'] = tr.rolling(14).mean()
     
-    delta = df['Close'].diff()
+    # 3. RSI
+    delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(9).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(9).mean()
-    rs = gain / loss
-    df['RSI9'] = 100 - (100 / (1 + rs))
+    df['RSI9'] = 100 - (100 / (1 + gain/loss))
+
+    # ★ V7追加: MACD
+    exp12 = close.ewm(span=12, adjust=False).mean()
+    exp26 = close.ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp12 - exp26
+    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Hist'] = df['MACD'] - df['Signal']
+
+    # ★ V7追加: 一目均衡表 (雲)
+    high9 = high.rolling(9).max(); low9 = low.rolling(9).min()
+    tenkan = (high9 + low9) / 2
+    high26 = high.rolling(26).max(); low26 = low.rolling(26).min()
+    kijun = (high26 + low26) / 2
+    
+    senkou_a = ((tenkan + kijun) / 2).shift(26)
+    high52 = high.rolling(52).max(); low52 = low.rolling(52).min()
+    senkou_b = ((high52 + low52) / 2).shift(26)
+    
+    df['Cloud_Top'] = pd.concat([senkou_a, senkou_b], axis=1).max(axis=1)
 
     return df.dropna()
 
@@ -140,46 +162,71 @@ def calculate_metrics_at_date(df, idx):
     recent_high = df['High'].iloc[idx-60:idx].max()
     dist_to_res = ((price - recent_high) / recent_high) * 100 if recent_high > 0 else 0
     
-    adx = float(curr['ADX'])
-    prev_adx = float(df['ADX'].iloc[idx-1])
-    
-    sma25 = float(curr['SMA25'])
-    ma_deviation = ((price / sma25) - 1) * 100
-    
     bb_width = float(curr['BB_Width'])
     prev_width = float(df['BB_Width'].iloc[idx-5]) if df['BB_Width'].iloc[idx-5] > 0 else 0.1
     expansion_rate = bb_width / prev_width
     
-    vol_ma20 = float(curr['Vol_MA20'])
-    vol_ratio = float(curr['Volume']) / vol_ma20 if vol_ma20 > 0 else 0
-    rsi_9 = float(curr['RSI9'])
+    vol_ratio = float(curr['Volume']) / float(curr['Vol_MA20']) if float(curr['Vol_MA20']) > 0 else 0
     
+    # 出来高推移 (5日)
+    vol_history = []
+    for i in range(4, -1, -1):
+        if idx-i >= 0:
+            row = df.iloc[idx-i]
+            vr = float(row['Volume']) / float(row['Vol_MA20']) if float(row['Vol_MA20']) > 0 else 0
+            vol_history.append(f"{vr:.1f}")
+    vol_history_str = "->".join(vol_history)
+
+    # V7指標
+    macd = float(curr['MACD'])
+    macd_hist = float(curr['MACD_Hist'])
+    prev_hist = float(df['MACD_Hist'].iloc[idx-1])
+    
+    cloud_top = float(curr['Cloud_Top']) if not pd.isna(curr['Cloud_Top']) else 0
+    price_vs_cloud = "Above" if price > cloud_top else "Below"
+    
+    open_p = float(curr['Open']); close_p = float(curr['Close']); high_p = float(curr['High']); low_p = float(curr['Low'])
+    body_top = max(open_p, close_p)
+    upper_shadow = high_p - body_top
+    total_range = high_p - low_p
+    shadow_ratio = upper_shadow / total_range if total_range > 0 else 0
+    candle_shape = "Good" if shadow_ratio < 0.3 else "Bad (Long Upper Shadow)"
+
     return {
         'price': price,
-        'resistance_price': recent_high,
         'dist_to_res': dist_to_res,
-        'ma_deviation': ma_deviation,
-        'adx': adx,
-        'prev_adx': prev_adx,
+        'ma_deviation': ((price / float(curr['SMA25'])) - 1) * 100,
+        'adx': float(curr['ADX']),
+        'prev_adx': float(df['ADX'].iloc[idx-1]),
         'plus_di': float(curr['PlusDI']),
         'minus_di': float(curr['MinusDI']),
-        'rs_rating': 0.0, 
         'vol_ratio': vol_ratio,
+        'vol_history': vol_history_str,
         'expansion_rate': expansion_rate,
         'atr_value': float(curr['ATR']),
-        'rsi_9': rsi_9
+        'macd_val': macd,
+        'macd_hist': macd_hist,
+        'macd_trend': "Expanding" if abs(macd_hist) > abs(prev_hist) else "Shrinking",
+        'price_vs_cloud': price_vs_cloud,
+        'candle_shape': candle_shape,
+        'rsi_9': float(curr['RSI9'])
     }
 
 # ==========================================
-# 2. 鉄の掟 & 補助関数
+# 2. 鉄の掟 & 補助関数 (V7)
 # ==========================================
 def check_iron_rules(metrics):
     if metrics['adx'] < 20: return "ADX<20"
     if metrics['vol_ratio'] < 0.8: return "Vol<0.8"
     
     ma_dev = metrics['ma_deviation']
-    if 10.0 <= ma_dev <= 15.0: return f"DangerZone({ma_dev:.1f}%)"
+    if MA_DEV_DANGER_LOW <= ma_dev <= MA_DEV_DANGER_HIGH: 
+        return f"DangerZone({ma_dev:.1f}%)"
     if metrics['adx'] > 55: return "ADX Overheat"
+    
+    # ★V7追加: 雲の下でのロングは禁止
+    if metrics['price_vs_cloud'] == "Below": return "Below Ichimoku Cloud"
+    
     return None
 
 def create_chart_image_at_date(df, idx, ticker):
@@ -192,7 +239,13 @@ def create_chart_image_at_date(df, idx, ticker):
         ax1.plot(data.index, data['Close'], color='black', label='Close')
         ax1.plot(data.index, sma20 + 2*std20, color='green', alpha=0.5, linestyle='--', label='+2σ')
         ax1.plot(data.index, sma20 - 2*std20, color='green', alpha=0.5, linestyle='--', label='-2σ')
-        ax1.set_title(f"{ticker} Chart")
+        
+        # 雲
+        if 'Cloud_Top' in data.columns:
+            ax1.plot(data.index, data['Cloud_Top'], color='blue', alpha=0.2, label='Cloud Top')
+            ax1.fill_between(data.index, data['Cloud_Top'], data['Close'].min(), color='blue', alpha=0.05)
+
+        ax1.set_title(f"{ticker} V7 Chart")
         ax1.legend(); ax1.grid(True, alpha=0.3)
         ax2.bar(data.index, data['Volume'], color='gray', alpha=0.5)
         ax2.set_ylabel("Volume")
@@ -256,38 +309,53 @@ class MemorySystem:
         return text
 
 # ==========================================
-# 4. AI エージェント
+# 4. AI エージェント (V7 Sniper)
 # ==========================================
 def run_analyst(model, ticker, metrics, chart_bytes, cbr_text):
     prompt = f"""
 ### ROLE
-あなたは「高ボラティリティ・トレンドフォロー特化型AI」です。
-小さな利益は無視し、発生し始めた「大きなトレンド（急騰）」や「ブレイクアウト」のみを捕捉します。
+あなたは「高精度スナイパー・トレンドフォローAI」です。
+ダマシ(False Breakout)を極限まで回避し、本物のトレンド初動のみを狙撃します。
 
 ### INPUT DATA
 銘柄: {ticker} (現在価格: {metrics['price']:.0f}円)
 
-[テクニカル指標]
-1. Trend Strength (ADX): {metrics['adx']:.1f} (閾値: 25以上, 前日: {metrics['prev_adx']:.1f})
-2. Direction (+DI/-DI): +DI({metrics['plus_di']:.1f}) vs -DI({metrics['minus_di']:.1f})
-3. Volatility (BB Exp): {metrics['expansion_rate']:.2f}倍
-4. Volume Flow: {metrics['vol_ratio']:.2f}倍
-5. MA Deviation: {metrics['ma_deviation']:.2f}% (過熱感チェック)
+[基本指標]
+1. Trend (ADX): {metrics['adx']:.1f} (閾値25以上)
+2. Direction: +DI({metrics['plus_di']:.1f}) vs -DI({metrics['minus_di']:.1f})
+3. Volatility: {metrics['expansion_rate']:.2f}倍 (スクイーズからの拡大が良い)
+4. Volume: {metrics['vol_ratio']:.2f}倍
+   - 推移: {metrics['vol_history']}
 
-[重要コンテキスト]
-- **抵抗線位置**: {metrics['resistance_price']:.0f}円 (現在価格との差: {metrics['dist_to_res']:.1f}%)
+[★ダマシ回避・精密検査]
+1. **MACD**: Hist={metrics['macd_hist']:.2f} ({metrics['macd_trend']})
+   - ヒストグラムがプラス圏で拡大中なら強い。マイナスなら警戒。
+2. **Ichimoku Cloud**: Price is {metrics['price_vs_cloud']} the Cloud.
+   - 雲の下(Below)での買いは自殺行為のため禁止。
+3. **Candle Shape**: {metrics['candle_shape']}
+   - 長い上ヒゲ(Bad)は売り圧力の証明。大陽線(Good)が理想。
+4. **Resistance**: 距離 {metrics['dist_to_res']:.1f}%
+
 {cbr_text}
 
 ### EVALUATION LOGIC
-1. **ブレイクアウト判定**:
-   - 抵抗線(resistance_price)を価格が上回っている、または抵抗線での攻防を制しつつあるか？
-   - 抵抗線を明確に超えていれば "BUY" の確度アップ。
-   
-2. **過熱感チェック**:
-   - MA乖離率(ma_deviation)が +30% を超えている場合は "HOLD" (高値掴み警戒)。
+- **BUY条件**:
+  1. 抵抗線を明確に超えている、または直前でMACD等のモメンタムが強い。
+  2. 価格が「雲」の上にあること (必須)。
+  3. ローソク足に長い上ヒゲがないこと。
+  4. 出来高が伴っていること。
 
-### OUTPUT REQUIREMENT
-分析レポートを簡潔に記述してください。
+- **HOLD条件**:
+  - 上記のいずれかに懸念がある場合。特に「上ヒゲ」や「雲の下」は即HOLD。
+
+### OUTPUT REQUIREMENT (JSON ONLY)
+{{
+  "action": "BUY" or "HOLD",
+  "confidence": 0-100,
+  "stop_loss": "推奨する損切り価格（整数）",
+  "target_price": "推奨する利確目標価格（整数）",
+  "reason": "判断理由(50文字以内)"
+}}
 """
     safety = {HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
     try:
@@ -344,7 +412,7 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
       "ticker": "銘柄コード",
       "action": "BUY",
       "shares": 購入株数 (整数),
-      "stop_loss": 損切り価格 (数値のみ。例: 1500),
+      "stop_loss": 損切り価格 (数値のみ),
       "reason": "選定理由を50文字以内で"
     }}
   ]
@@ -362,7 +430,7 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
 # 5. メイン実行
 # ==========================================
 def main():
-    print(f"=== 🧪 酸性試験 (Home Run Strategy: A) ({START_DATE} ~ {END_DATE}) ===")
+    print(f"=== 🧪 酸性試験 (V7: Sniper & Home Run) ({START_DATE} ~ {END_DATE}) ===")
     print(f"初期資金: {INITIAL_CAPITAL:,.0f}円 | 損切: ATRx{ATR_STOP_MULTIPLIER}")
     print(f"利確設定: +{TRAILING_TRIGGER*100}%超えまで我慢 -> 以降ATRx{TRAILING_MULTIPLIER}追従")
 
@@ -393,7 +461,7 @@ def main():
         return
 
     cash = INITIAL_CAPITAL
-    portfolio = {} # {ticker: {buy_price, shares, sl_price, max_price, atr}}
+    portfolio = {} 
     trade_history = []
     equity_curve = []
     daily_history = []
@@ -466,6 +534,7 @@ def main():
 
                 metrics = calculate_metrics_at_date(df, idx)
 
+                # 鉄の掟チェック (V7)
                 iron_rule_check = check_iron_rules(metrics)
                 if iron_rule_check: continue 
 

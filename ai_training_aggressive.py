@@ -35,7 +35,7 @@ if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
 
 # ★ファイル名をV7_VOLに変更
-LOG_FILE = "ai_trade_memory_aggressive_v7_vol.csv" 
+LOG_FILE = "ai_trade_memory_aggressive_v7.csv" 
 MODEL_NAME = 'models/gemini-2.0-flash'
 
 TRAINING_ROUNDS = 5000
