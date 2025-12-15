@@ -13,7 +13,6 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import re
-import subprocess 
 import logging
 import socket
 import requests.packages.urllib3.util.connection as urllib3_cn
@@ -21,7 +20,6 @@ import requests.packages.urllib3.util.connection as urllib3_cn
 # ---------------------------------------------------------
 # ★環境設定
 # ---------------------------------------------------------
-# IPv4強制
 def allowed_gai_family():
     return socket.AF_INET
 urllib3_cn.allowed_gai_family = allowed_gai_family
@@ -32,129 +30,37 @@ try:
 except ImportError:
     pass
 
-# ==========================================
-# ★設定エリア
-# ==========================================
-GOOGLE_API_KEY = os.getenv("TRAINING_API_KEY") # または 
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
 
-# ★攻撃型V2用のファイルを使用
-LOG_FILE = "ai_trade_memory_aggressive.csv" 
+# ★ファイル名をV5に変更 (ターゲット分析用)
+LOG_FILE = "ai_trade_memory_aggressive_v5.csv" 
 MODEL_NAME = 'models/gemini-2.0-flash'
 
-TRAINING_ROUNDS = 2000 # トレーニング回数
+TRAINING_ROUNDS = 500
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
-TRADE_BUDGET = 1000000 # 1トレードあたりの予算
+TRADE_BUDGET = 1000000 
 
-# ★高ボラティリティ・トレンド銘柄リスト（半導体、グロース、主力大型）
-# ★監視・トレーニング対象リスト (全100銘柄)
+# 設定
+ATR_MULTIPLIER = 1.8         
+MA_DEV_DANGER_LOW = 10.0     
+MA_DEV_DANGER_HIGH = 15.0    
+
+# トレーニングリスト
 TRAINING_LIST = [
-    # --- 1. 半導体・ハイテク (最重要・高ボラ) ---
-    "6920.T", # レーザーテック (売買代金トップ常連)
-    "8035.T", # 東京エレクトロン
-    "6146.T", # ディスコ
-    "6857.T", # アドバンテスト
-    "7735.T", # スクリーン
-    "6723.T", # ルネサス
-    "6963.T", # ローム
-    "3436.T", # SUMCO
-    "6526.T", # ソシオネクスト
-    "6315.T", # TOWA
-    "6254.T", # 野村マイクロ
-
-    # --- 2. 電気機器・電子部品 (世界景気連動) ---
-    "6758.T", # ソニーG
-    "6861.T", # キーエンス (値がさ株の王)
-    "6981.T", # 村田製作所
-    "6594.T", # ニデック (旧日本電産)
-    "6954.T", # ファナック (ロボット)
-    "6506.T", # 安川電機
-    "6702.T", # 富士通
-    "6752.T", # パナソニック
-    "7751.T", # キヤノン
-    "6501.T", # 日立製作所
-    "6503.T", # 三菱電機
-
-    # --- 3. 自動車・輸送用機器 (円安メリット) ---
-    "7203.T", # トヨタ
-    "7267.T", # ホンダ
-    "7269.T", # スズキ
-    "7270.T", # SUBARU (為替感応度高い)
-    "7201.T", # 日産自動車
-    "7259.T", # アイシン
-    "6902.T", # デンソー
-
-    # --- 4. 機械・重工・防衛 (地政学・インフラ) ---
-    "7011.T", # 三菱重工 (防衛筆頭)
-    "7013.T", # IHI
-    "7012.T", # 川崎重工
-    "6301.T", # コマツ (建機・中国関連)
-    "6305.T", # 日立建機
-    "6367.T", # ダイキン (空調世界一)
-    "7003.T", # 三井E&S (造船・クレーン)
-
-    # --- 5. 商社・卸売 (バフェット銘柄・高配当) ---
-    "8058.T", # 三菱商事
-    "8001.T", # 伊藤忠
-    "8031.T", # 三井物産
-    "8002.T", # 丸紅
-    "8053.T", # 住友商事
-    "2768.T", # 双日
-    "7459.T", # メディパル (医薬品卸)
-
-    # --- 6. 金融・銀行・保険 (金利テーマ) ---
-    "8306.T", # 三菱UFJ
-    "8316.T", # 三井住友FG
-    "8411.T", # みずほFG
-    "8766.T", # 東京海上
-    "8725.T", # MS&AD
-    "8591.T", # オリックス
-    "8604.T", # 野村HD
-    "8698.T", # マネックスG (暗号資産連動)
-
-    # --- 7. 通信・サービス・AI (内需・グロース) ---
-    "9984.T", # ソフトバンクG (AI投資会社)
-    "9432.T", # NTT (ディフェンシブだが流動性高い)
-    "9433.T", # KDDI
-    "9434.T", # ソフトバンク
-    "6098.T", # リクルート
-    "2413.T", # エムスリー (グロース代表)
-    "4661.T", # オリエンタルランド
-    "4385.T", # メルカリ
-    "4751.T", # サイバーエージェント
-    "9613.T", # NTTデータ
-
-    # --- 8. 小売・食品・消費 (インバウンド) ---
-    "9983.T", # ファーストリテイリング (日経寄与度1位)
-    "3382.T", # セブン＆アイ
-    "8267.T", # イオン
-    "2802.T", # 味の素
-    "2914.T", # JT
-    "4911.T", # 資生堂
-    "4543.T", # テルモ
-    "4503.T", # アステラス製薬
-    "4568.T", # 第一三共 (がん治療薬で急伸)
-
-    # --- 9. ゲーム・エンタメ (ヒット作で急騰) ---
-    "7974.T", # 任天堂
-    "9697.T", # カプコン
-    "9766.T", # コナミG
-    "5253.T", # カバー (ホロライブ)
-    "9166.T", # GENDA
-
-    # --- 10. 海運・鉄鋼・資源 (市況関連) ---
-    "9101.T", # 日本郵船
-    "9104.T", # 商船三井
-    "9107.T", # 川崎汽船 (高ボラティリティ)
-    "5401.T", # 日本製鉄
-    "5411.T", # JFE
-    "1605.T", # INPEX (原油)
-    "5713.T", # 住友金属鉱山 (金・銅)
-    "5020.T", # ENEOS
-    "4063.T", # 信越化学
-    "4901.T"  # 富士フイルム
+    "6254.T", "8035.T", "2768.T", "6305.T", "6146.T",
+    "6920.T", "6857.T", "7735.T", "6723.T", "6963.T", "3436.T", "6526.T", "6315.T",
+    "6758.T", "6861.T", "6981.T", "6594.T", "6954.T", "6506.T", "6702.T", "6752.T", "7751.T", "6501.T", "6503.T",
+    "7203.T", "7267.T", "7269.T", "7270.T", "7201.T", "7259.T", "6902.T",
+    "7011.T", "7013.T", "7012.T", "6301.T", "6367.T", "7003.T",
+    "8058.T", "8001.T", "8031.T", "8002.T", "8053.T", "7459.T",
+    "8306.T", "8316.T", "8411.T", "8766.T", "8725.T", "8591.T", "8604.T", "8698.T",
+    "9984.T", "9432.T", "9433.T", "9434.T", "6098.T", "2413.T", "4661.T", "4385.T", "4751.T", "9613.T",
+    "9983.T", "3382.T", "8267.T", "2802.T", "2914.T", "4911.T", "4543.T", "4503.T", "4568.T",
+    "7974.T", "9697.T", "9766.T", "5253.T", 
+    "9101.T", "9104.T", "9107.T", "5401.T", "5411.T", "1605.T", "5713.T", "5020.T", "4063.T", "4901.T"
 ]
 
 plt.rcParams['font.family'] = 'sans-serif'
@@ -163,7 +69,7 @@ genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
 # ==========================================
 # 1. データ取得 & テクニカル計算
 # ==========================================
-def download_data_safe(ticker, period="5y", interval="1d", retries=3): # 期間を長めに
+def download_data_safe(ticker, period="5y", interval="1d", retries=3): 
     wait = 2
     for attempt in range(retries):
         try:
@@ -179,11 +85,8 @@ def download_data_safe(ticker, period="5y", interval="1d", retries=3): # 期間�
 
 def calculate_technical_indicators(df):
     df = df.copy()
-    
-    # 基本指標
     df['SMA25'] = df['Close'].rolling(25).mean()
     
-    # DMI / ADX
     high = df['High']; low = df['Low']; close = df['Close']
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
@@ -206,16 +109,12 @@ def calculate_technical_indicators(df):
     df['PlusDI'] = plus_di
     df['MinusDI'] = minus_di
 
-    # ボリンジャーバンド & 出来高
     sma20 = df['Close'].rolling(20).mean()
     std20 = df['Close'].rolling(20).std()
     df['BB_Width'] = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100
     df['Vol_MA20'] = df['Volume'].rolling(20).mean()
-    
-    # ATR
     df['ATR'] = tr.rolling(14).mean()
     
-    # RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(9).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(9).mean()
@@ -228,30 +127,22 @@ def calculate_metrics_for_training(df, idx):
     curr = df.iloc[idx]
     price = float(curr['Close'])
     
-    # 抵抗線（過去60日高値）
-    past_60 = df.iloc[idx-60:idx]
-    recent_high = past_60['High'].max()
+    past_15 = df.iloc[idx-15:idx]
+    recent_high = past_15['High'].max()
     dist_to_res = ((price - recent_high) / recent_high) * 100 if recent_high > 0 else 0
     
-    # ADXトレンド
     adx = float(curr['ADX'])
     prev_adx = float(df['ADX'].iloc[idx-1])
     
-    # MA乖離
     sma25 = float(curr['SMA25'])
     ma_deviation = ((price / sma25) - 1) * 100
     
-    # BB拡大率
     bb_width = float(curr['BB_Width'])
     prev_width = float(df['BB_Width'].iloc[idx-5]) if df['BB_Width'].iloc[idx-5] > 0 else 0.1
     expansion_rate = bb_width / prev_width
     
-    # 出来高倍率
     vol_ma20 = float(curr['Vol_MA20'])
     vol_ratio = float(curr['Volume']) / vol_ma20 if vol_ma20 > 0 else 0
-    
-    # RS (簡易版: 市場データとの比較は省略し、自身のモメンタムで代用)
-    # 本番では市場との比較を行うが、トレーニングでは「強い動き」かどうかを見る
     rsi_9 = float(curr['RSI9'])
     
     return {
@@ -263,15 +154,24 @@ def calculate_metrics_for_training(df, idx):
         'prev_adx': prev_adx,
         'plus_di': float(curr['PlusDI']),
         'minus_di': float(curr['MinusDI']),
-        'rs_rating': 0.0, # トレーニングでは省略
+        'rs_rating': 0.0, 
         'vol_ratio': vol_ratio,
         'expansion_rate': expansion_rate,
         'atr_value': float(curr['ATR']),
         'rsi_9': rsi_9
     }
 
+def check_iron_rules(metrics):
+    if metrics['adx'] < 20: return "ADX<20"
+    if metrics['vol_ratio'] < 0.8: return "Vol<0.8"
+    ma_dev = metrics['ma_deviation']
+    if MA_DEV_DANGER_LOW <= ma_dev <= MA_DEV_DANGER_HIGH: 
+        return f"DangerZone({ma_dev:.1f}%)"
+    if metrics['adx'] > 55: return "ADX Overheat"
+    return None
+
 # ==========================================
-# 2. CBRメモリシステム (攻撃型V2対応)
+# 2. CBRメモリシステム
 # ==========================================
 class CaseBasedMemory:
     def __init__(self, csv_path):
@@ -279,18 +179,16 @@ class CaseBasedMemory:
         self.scaler = StandardScaler()
         self.knn = None
         self.df = pd.DataFrame()
-        # ★特徴量を攻撃型に合わせて変更
         self.feature_cols = ['adx', 'prev_adx', 'ma_deviation', 'vol_ratio', 'expansion_rate', 'dist_to_res']
         
-        # ★保存カラム (V2仕様)
+        # ★保存カラム (Actual_High, Target_Diff 追加)
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "target_price", 
-            "Price", 
-            "adx", "prev_adx", "ma_deviation", "rs_rating", 
-            "vol_ratio", "expansion_rate", 
-            "dist_to_res", "days_to_earnings", "margin_ratio", 
-            "profit_rate"
+            "Actual_High", "Target_Diff", "Target_Reach", # <--- 追加: 分析用
+            "Price", "adx", "prev_adx", "ma_deviation", "rs_rating", 
+            "vol_ratio", "expansion_rate", "dist_to_res", "days_to_earnings", 
+            "margin_ratio", "profit_rate"
         ]
         self.load_and_train()
 
@@ -298,7 +196,6 @@ class CaseBasedMemory:
         if not os.path.exists(self.csv_path): return
         try:
             self.df = pd.read_csv(self.csv_path)
-            # カラム補完
             for col in self.csv_columns:
                 if col not in self.df.columns: self.df[col] = 0.0
         except Exception: return
@@ -313,8 +210,7 @@ class CaseBasedMemory:
                 global CBR_NEIGHBORS_COUNT
                 self.knn = NearestNeighbors(n_neighbors=min(CBR_NEIGHBORS_COUNT, len(valid_df)), metric='euclidean')
                 self.knn.fit(self.features_normalized)
-        except Exception as e:
-            print(f"Memory Init Error: {e}")
+        except Exception: pass
 
     def search_similar_cases(self, current_metrics):
         if self.knn is None: return "（データ不足）"
@@ -336,11 +232,9 @@ class CaseBasedMemory:
 
     def save_experience(self, data_dict):
         new_df = pd.DataFrame([data_dict])
-        # カラム順序を揃える
         for col in self.csv_columns:
             if col not in new_df.columns: new_df[col] = None
         new_df = new_df[self.csv_columns]
-
         try:
             if not os.path.exists(self.csv_path):
                 new_df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
@@ -364,22 +258,15 @@ def create_chart_image(df, name):
     ax1.plot(data.index, sma20 - 2*std20, color='green', alpha=0.5, linestyle='--', label='-2σ')
     ax1.set_title(f"{name} Training Chart")
     ax1.legend(); ax1.grid(True, alpha=0.3)
-    
     ax2.bar(data.index, data['Volume'], color='gray', alpha=0.5)
     ax2.set_ylabel("Volume")
     ax2.grid(True, alpha=0.3)
-    
     buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=80); plt.close(fig); buf.seek(0)
     return buf.getvalue()
 
 def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
-    # --- フィルタリング ---
-    if metrics['adx'] < 20:
-         return {"action": "HOLD", "reason": "【鉄の掟】トレンドレス (ADX<20)"}
-    if metrics['vol_ratio'] < 0.8:
-         return {"action": "HOLD", "reason": "【鉄の掟】出来高不足"}
-
-    # ★攻撃型プロンプト (トレーニング用)
+    if metrics['adx'] < 20: return {"action": "HOLD", "reason": "ADX<20"}
+    
     prompt = f"""
 ### ROLE
 あなたは「高ボラティリティ・トレンドフォロー特化型AI」です。
@@ -402,8 +289,7 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
 ### EVALUATION LOGIC
 1. **ブレイクアウト判定**:
    - 抵抗線(resistance_price)を価格が上回っている、または抵抗線での攻防を制しつつあるか？
-   - 抵抗線の直前(差が0〜1%程度)で止まっている場合は "HOLD" (反落リスク)。
-   - 抵抗線を超えていれば "BUY" の確度アップ。
+   - 抵抗線を明確に超えていれば "BUY" の確度アップ。
    
 2. **過熱感チェック**:
    - MA乖離率(ma_deviation)が +30% を超えている場合は "HOLD" (高値掴み警戒)。
@@ -424,15 +310,15 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match: text = match.group(0)
         return json.loads(text)
-    except Exception as e:
-        return {"action": "HOLD", "reason": f"AI Error: {e}", "confidence": 0}
+    except Exception:
+        return {"action": "HOLD", "reason": "AI Error", "confidence": 0}
 
 # ==========================================
 # 4. メイン実行 (トレーニングモード)
 # ==========================================
 def main():
     start_time = time.time()
-    print(f"=== AI強化合宿 [AGGRESSIVE MODE] ===")
+    print(f"=== AI強化合宿 [AGGRESSIVE V5] (Target Analysis) ===")
     
     memory_system = CaseBasedMemory(LOG_FILE) 
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
@@ -440,13 +326,15 @@ def main():
 
     processed_data = {}
     print(f"データをダウンロード中...")
-    for t in TRAINING_LIST:
-        df = download_data_safe(t,period="10y", interval=TIMEFRAME)
+    for i, t in enumerate(TRAINING_LIST):
+        if i % 10 == 0: print(f"  - {i}/{len(TRAINING_LIST)}")
+        df = download_data_safe(t, interval=TIMEFRAME)
         if df is None: continue
         df = calculate_technical_indicators(df)
         processed_data[t] = df
 
-    if not processed_data: print("データ不足のため終了します。"); return
+    if not processed_data: print("データ不足"); return
+    print(f"データ取得完了 ({int(time.time() - start_time)}秒)")
 
     win_count = 0; loss_count = 0
     total_profit_loss = 0.0 
@@ -458,10 +346,7 @@ def main():
         df = processed_data[ticker]
         if len(df) < 110: continue 
         
-        # 過去のランダムな時点を選択
-        target_idx = random.randint(100, len(df) - 65) # 未来データ確保のため-65
-        current_date_str = df.index[target_idx].strftime('%Y-%m-%d')
-        
+        target_idx = random.randint(100, len(df) - 65) 
         metrics = calculate_metrics_for_training(df, target_idx)
         
         cbr_text = memory_system.search_similar_cases(metrics)
@@ -472,60 +357,51 @@ def main():
         action = decision.get('action', 'HOLD')
         conf = decision.get('confidence', 0)
 
-        # 鉄の掟やAIの判断でHOLDならスキップ
-        if action == "HOLD": 
-            # HOLDでも稀にログ出力（生存確認用）
-            if i % 20 == 0: print(f"Round {i:03}: {ticker} -> HOLD ({decision.get('reason')})")
-            continue
+        if action == "HOLD": continue
 
-        print(f"Round {i:03}: {ticker} ({current_date_str}) -> BUY 🔴 (自信:{conf}%)")
+        print(f"Round {i:03}: {ticker} -> BUY 🔴 (自信:{conf}%)")
 
-        # --- シミュレーション ---
         entry_price = float(metrics['price'])
         atr = metrics['atr_value']
         
-        # AI提案のSLがあれば採用、なければ ATR x 2.5
+        # 損切り・目標設定
         ai_stop = decision.get('stop_loss', 0)
-        try: ai_stop = int(ai_stop)
-        except: ai_stop = 0
-        current_stop_loss = ai_stop if ai_stop > 0 else entry_price - (atr * 2.0)
+        ai_target = decision.get('target_price', 0)
+        try: ai_stop = int(ai_stop); ai_target = int(ai_target)
+        except: ai_stop = 0; ai_target = 0
+        
+        current_stop_loss = ai_stop if ai_stop > 0 else entry_price - (atr * 1.8)
         
         shares = int(TRADE_BUDGET // entry_price)
         if shares < 1: shares = 1
         
-        # 未来60日のデータを取得
         future_prices = df.iloc[target_idx+1 : target_idx+61]
-        
         result = "DRAW"; profit_loss = 0.0; final_exit_price = entry_price
         max_price = entry_price
-        
         is_loss = False
         
-        # 日ごとの値動きを追跡
+        # ★追加: 期間中の最高値を記録 (Actual High)
+        actual_high = future_prices['High'].max()
+        
         for _, row in future_prices.iterrows():
             high = row['High']; low = row['Low']; close = row['Close']
             
-            # 1. 損切り判定
+            # 損切り
             if low <= current_stop_loss:
                 is_loss = True
                 final_exit_price = current_stop_loss
                 break
             
-            # 2. トレーリングストップ判定（攻撃型）
+            # トレーリングストップ
             if high > max_price:
                 max_price = high
                 profit_pct = (max_price - entry_price) / entry_price
                 
-                # 利益が乗ってきたらストップを引き上げる
-                trail_dist = atr * 2.5 # 標準
-                if profit_pct > 0.10: trail_dist = atr * 1.0 # +10%超えでタイトに
-                elif profit_pct > 0.20: trail_dist = atr * 0.5 # +20%超えで超タイトに
-                
+                trail_dist = atr * 1.8 
+                if profit_pct > 0.05: trail_dist = atr * 1.0
                 new_stop = max_price - trail_dist
-                # 建値決済保証 (+3%乗ったら建値以上にSLを置く)
-                if profit_pct > 0.03:
-                    new_stop = max(new_stop, entry_price * 1.005)
-                
+                if profit_pct > 0.02:
+                    new_stop = max(new_stop, entry_price * 1.002)
                 if new_stop > current_stop_loss:
                     current_stop_loss = new_stop
 
@@ -538,37 +414,51 @@ def main():
         if profit_loss > 0: result = "WIN"; win_count += 1
         elif profit_loss < 0: result = "LOSS"; loss_count += 1
 
-        print(f"   結果: {result} (PL: {profit_loss:+.0f}円 / {profit_rate:+.2f}%) > {decision.get('reason')}")
+        print(f"   結果: {result} (PL: {profit_loss:+.0f}円 / {profit_rate:+.2f}%) Tgt:{ai_target} Actual:{actual_high:.0f}")
 
-        # --- 結果保存 ---
+        # ★追加計算: ターゲットとの差分
+        target_diff = 0
+        target_reach = 0
+        if ai_target > 0:
+            target_diff = actual_high - ai_target
+            # 到達率 (上昇幅に対する達成度)
+            upside_potential = ai_target - entry_price
+            actual_upside = actual_high - entry_price
+            if upside_potential > 0:
+                target_reach = (actual_upside / upside_potential) * 100
+
         save_data = {
-            'Date': current_date_str, 'Ticker': ticker, 'Timeframe': TIMEFRAME, 
+            'Date': df.index[target_idx].strftime('%Y-%m-%d'), 
+            'Ticker': ticker, 'Timeframe': TIMEFRAME, 
             'Action': action, 'result': result, 
             'Reason': decision.get('reason', 'None'),
             'Confidence': conf, 
             'stop_loss_price': current_stop_loss, 
-            'target_price': decision.get('target_price', 0), 
+            'target_price': ai_target, 
+            # ★新規項目
+            'Actual_High': actual_high,
+            'Target_Diff': target_diff,
+            'Target_Reach': target_reach,
+            
             'Price': metrics['price'], 
             'adx': metrics['adx'], 
             'prev_adx': metrics['prev_adx'],
             'ma_deviation': metrics['ma_deviation'], 
-            'rs_rating': 0, # トレーニングでは省略
+            'rs_rating': 0,
             'vol_ratio': metrics['vol_ratio'], 
             'expansion_rate': metrics['expansion_rate'],
             'dist_to_res': metrics['dist_to_res'],       
-            'days_to_earnings': 999, # トレーニングでは省略
-            'margin_ratio': 1.0,     # トレーニングでは省略
+            'days_to_earnings': 999,
+            'margin_ratio': 1.0, 
             'profit_rate': profit_rate 
         }
         memory_system.save_experience(save_data)
         time.sleep(1)
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    elapsed_str = str(datetime.timedelta(seconds=int(elapsed_time)))
-    print(f"\n=== 合宿終了 ===")
+
+    elapsed_time = time.time() - start_time
+    print(f"\n=== 合宿終了 ({str(datetime.timedelta(seconds=int(elapsed_time)))}) ===")
     print(f"戦績 (BUY): {win_count}勝 {loss_count}敗")
     print(f"合計損益: {total_profit_loss:+.0f}円")
-    print(f"合宿時間: {elapsed_str}")
 
 if __name__ == "__main__":
     main()

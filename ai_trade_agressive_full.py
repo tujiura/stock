@@ -27,7 +27,6 @@ import logging
 # ---------------------------------------------------------
 sys.stdout.reconfigure(encoding='utf-8')
 
-# IPv4強制 (一部環境での接続遅延対策)
 def allowed_gai_family():
     return socket.AF_INET
 urllib3_cn.allowed_gai_family = allowed_gai_family
@@ -43,31 +42,33 @@ except ImportError:
 # ==========================================
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
-    print("エラー: GOOGLE_API_KEY が設定されていません。.envファイルを確認してください。")
+    print("エラー: GOOGLE_API_KEY が設定されていません。")
 
 webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
 
 genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
 
-# ★ファイル設定 (攻撃型V2)
-# 項目が増えたため、新しいファイル名を使用します
-LOG_FILE = "ai_trade_memory_aggressive.csv" 
+# ★ファイル設定 (攻撃型V4)
+LOG_FILE = "ai_trade_memory_aggressive_v4.csv" 
 REAL_TRADE_LOG_FILE = "real_trade_record_aggressive.csv" 
-MODEL_NAME = 'models/gemini-2.0-flash' # 高速モデル
+MODEL_NAME = 'models/gemini-2.0-flash'
 
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
 
-# ★監視リスト (高ボラティリティ・トレンドが出やすい銘柄群)
+# ★監視リスト (V4精鋭リスト: GENDA除外、相性の良い銘柄群)
 WATCH_LIST = [
-    # 半導体・ハイテク (値動きが激しい)
-    "6920.T", "8035.T", "6146.T", "7735.T", "6857.T", "6723.T", "6367.T",
-    # グロース・新興・人気株
-    "5253.T", "9166.T", "5595.T", "6254.T", "7011.T", "7013.T", "3993.T",
-    # 大型・流動性高・トレンド強
-    "9984.T", "9983.T", "7203.T", "8306.T", "1605.T", "5401.T",
-    # 商社・金融 (モメンタム時)
-    "8058.T", "8001.T", "8306.T"
+    "6254.T", "8035.T", "2768.T", "6305.T", "6146.T",
+    "6920.T", "6857.T", "7735.T", "6723.T", "6963.T", "3436.T", "6526.T", "6315.T",
+    "6758.T", "6861.T", "6981.T", "6594.T", "6954.T", "6506.T", "6702.T", "6752.T", "7751.T", "6501.T", "6503.T",
+    "7203.T", "7267.T", "7269.T", "7270.T", "7201.T", "7259.T", "6902.T",
+    "7011.T", "7013.T", "7012.T", "6301.T", "6367.T", "7003.T",
+    "8058.T", "8001.T", "8031.T", "8002.T", "8053.T", "7459.T",
+    "8306.T", "8316.T", "8411.T", "8766.T", "8725.T", "8591.T", "8604.T", "8698.T",
+    "9984.T", "9432.T", "9433.T", "9434.T", "6098.T", "2413.T", "4661.T", "4385.T", "4751.T", "9613.T",
+    "9983.T", "3382.T", "8267.T", "2802.T", "2914.T", "4911.T", "4543.T", "4503.T", "4568.T",
+    "7974.T", "9697.T", "9766.T", "5253.T", 
+    "9101.T", "9104.T", "9107.T", "5401.T", "5411.T", "1605.T", "5713.T", "5020.T", "4063.T", "4901.T"
 ]
 
 plt.rcParams['font.family'] = 'sans-serif'
@@ -76,26 +77,25 @@ plt.rcParams['font.family'] = 'sans-serif'
 # 1. データ取得関数群
 # ==========================================
 def download_data_safe(ticker, period="6mo", interval="1d", retries=3):
-    """安全に株価データを取得"""
     wait = 2
     for attempt in range(retries):
         try:
             logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+            # auto_adjust=True で警告回避
             df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
             if df.empty: return None
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
-            if len(df) < 60: return None # 期間計算用に少し多めに要求
+            if len(df) < 60: return None
             return df
         except:
             time.sleep(wait); wait *= 2
     return None
 
 def get_macro_data():
-    """日経平均などのマクロ環境を取得"""
     tickers = {"^N225": "日経平均", "JPY=X": "ドル円", "^GSPC": "米S&P500"}
     report = "【🌎 マクロ環境】\n"
     try:
-        data = yf.download(list(tickers.keys()), period="5d", progress=False)
+        data = yf.download(list(tickers.keys()), period="5d", progress=False, auto_adjust=True)
         if isinstance(data.columns, pd.MultiIndex): df_close = data['Close']
         else: df_close = data['Close'] if 'Close' in data else data
 
@@ -112,7 +112,6 @@ def get_macro_data():
     return report.strip()
 
 def get_latest_news(ticker):
-    """Google Newsから最新ニュース取得"""
     try:
         q = urllib.parse.quote(f"{ticker} 株価 材料")
         url = f"https://news.google.com/rss/search?q={q}&hl=ja&gl=JP&ceid=JP:ja"
@@ -121,7 +120,6 @@ def get_latest_news(ticker):
     except: return "取得エラー"
 
 def get_weekly_trend(ticker):
-    """週足トレンドの簡易判定"""
     try:
         df = yf.download(ticker, period="1y", interval="1wk", progress=False, auto_adjust=True)
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
@@ -136,14 +134,10 @@ def get_weekly_trend(ticker):
     except: return "不明"
 
 def get_fundamental_data(ticker):
-    """決算日、セクター、信用倍率(近似値)を取得"""
     try:
         t = yf.Ticker(ticker)
         info = t.info
-        
         sector = info.get('sector', 'Unknown')
-        
-        # shortRatioを信用倍率(需給)の代用として取得
         margin_ratio = info.get('shortRatio', 0.0) 
         if margin_ratio is None: margin_ratio = 1.0
         
@@ -166,51 +160,38 @@ def get_fundamental_data(ticker):
         return {"sector": "-", "margin_ratio": 0, "days_to_earnings": 999}
 
 # ==========================================
-# 2. 指標計算 (攻撃型フルスペック)
+# 2. 指標計算 (攻撃型V4仕様)
 # ==========================================
 def calculate_metrics_aggressive(df, market_df=None):
-    """
-    高ボラティリティ戦略用指標計算
-    ADX, DMI, RS, Resistance, MA Deviation, Volume Ratio
-    """
     if len(df) < 60: return None
     curr = df.iloc[-1]
     price = float(curr['Close'])
     
-    # --- 1. DMI / ADX (トレンド強度) ---
-    high = df['High']
-    low = df['Low']
-    close = df['Close']
-    
-    # True Range
+    # --- 1. DMI / ADX ---
+    high = df['High']; low = df['Low']; close = df['Close']
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
     tr3 = abs(low - close.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # DM Calculation
     plus_dm = high.diff()
     minus_dm = low.diff()
     plus_dm = plus_dm.where((plus_dm > 0) & (plus_dm > minus_dm), 0)
     minus_dm = minus_dm.where((minus_dm > 0) & (minus_dm > plus_dm), 0)
 
-    # Smooth (14日)
     tr_smooth = tr.rolling(14).mean()
     plus_dm_smooth = plus_dm.rolling(14).mean()
     minus_dm_smooth = minus_dm.rolling(14).mean()
 
-    # DI Calculation
     plus_di = 100 * (plus_dm_smooth / tr_smooth)
     minus_di = 100 * (minus_dm_smooth / tr_smooth)
-
-    # DX & ADX Calculation
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
     adx_series = dx.rolling(14).mean()
     
     adx = adx_series.iloc[-1]
     prev_adx = adx_series.iloc[-2] if len(adx_series) > 1 else adx
 
-    # --- 2. MA乖離率 (Overheat Check) ---
+    # --- 2. MA乖離率 ---
     sma25 = df['Close'].rolling(25).mean().iloc[-1]
     ma_deviation = ((price / sma25) - 1) * 100 
 
@@ -218,10 +199,9 @@ def calculate_metrics_aggressive(df, market_df=None):
     recent_high = df['High'].tail(60).max()
     dist_to_res = 0
     if recent_high > 0:
-        # 現在価格が抵抗線より下ならマイナス
         dist_to_res = ((price - recent_high) / recent_high) * 100
 
-    # --- 4. Relative Strength (対 日経平均) ---
+    # --- 4. Relative Strength ---
     rs_rating = 0
     if market_df is not None and len(market_df) > 25:
         try:
@@ -242,14 +222,20 @@ def calculate_metrics_aggressive(df, market_df=None):
     vol_ratio = current_vol / vol_ma20.iloc[-1] if vol_ma20.iloc[-1] > 0 else 0
     trading_value_oku = (price * current_vol) / 100000000 
 
-    # --- その他 ---
     atr = tr.rolling(14).mean().iloc[-1]
     
+    # RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(9).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(9).mean()
+    rs_val = gain / loss
+    rsi_9 = 100 - (100 / (1 + rs_val)).iloc[-1]
+
     return {
         'price': price,
-        'resistance_price': recent_high, # 抵抗線価格
-        'dist_to_res': dist_to_res,      # 抵抗線までの距離(%)
-        'ma_deviation': ma_deviation,    # 25MA乖離率
+        'resistance_price': recent_high,
+        'dist_to_res': dist_to_res,
+        'ma_deviation': ma_deviation,
         'adx': adx,
         'prev_adx': prev_adx,
         'plus_di': plus_di.iloc[-1],
@@ -258,28 +244,38 @@ def calculate_metrics_aggressive(df, market_df=None):
         'trading_value': trading_value_oku,
         'vol_ratio': vol_ratio,
         'expansion_rate': expansion_rate,
-        'atr_value': atr
+        'atr_value': atr,
+        'rsi_9': rsi_9
     }
 
 def check_breakout_rules(metrics):
-    """攻撃型フィルタリング：動かない銘柄、弱い銘柄はAIに見せる前に捨てる"""
+    """攻撃型V4フィルタリング"""
     
-    # 1. 流動性チェック: 売買代金5億円未満は危険
+    # 1. 流動性
     if metrics['trading_value'] < 5.0:
         return {"action": "HOLD", "reason": f"【対象外】流動性不足 ({metrics['trading_value']:.1f}億円)"}
 
-    # 2. トレンド強度チェック: ADXが低すぎる(20未満)
+    # 2. トレンド強度 (ADX)
     if metrics['adx'] < 20:
         return {"action": "HOLD", "reason": f"【対象外】トレンドレス (ADX {metrics['adx']:.1f})"}
+    
+    # 3. 過熱感 (ADX)
+    if metrics['adx'] > 55:
+        return {"action": "HOLD", "reason": f"【対象外】トレンド過熱 (ADX {metrics['adx']:.1f})"}
 
-    # 3. 相対強度チェック: 日経平均より著しく弱い
+    # 4. 相対強度
     if metrics['rs_rating'] < -3.0: 
         return {"action": "HOLD", "reason": f"【対象外】市場より弱い (RS {metrics['rs_rating']:.1f}%)"}
+
+    # 5. 魔の乖離ゾーン (V3からの教訓)
+    ma_dev = metrics['ma_deviation']
+    if 10.0 <= ma_dev <= 15.0:
+        return {"action": "HOLD", "reason": f"【対象外】魔の乖離ゾーン ({ma_dev:.1f}%) 調整警戒"}
 
     return None
 
 # ==========================================
-# 3. CBRメモリシステム (完全版)
+# 3. CBRメモリシステム (V4対応)
 # ==========================================
 class CaseBasedMemory:
     def __init__(self, csv_path):
@@ -287,20 +283,16 @@ class CaseBasedMemory:
         self.scaler = StandardScaler()
         self.knn = None
         self.df = pd.DataFrame()
-        
-        # ★特徴量: 抵抗線距離(dist_to_res)やMA乖離(ma_deviation)も類似検索に含める
         self.feature_cols = ['adx', 'prev_adx', 'ma_deviation', 'rs_rating', 'vol_ratio', 'expansion_rate', 'dist_to_res']
         
-        # ★保存カラム: 分析に必要な全データを網羅
+        # ★保存カラム (target_price追加)
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
-            "Confidence", "stop_loss_price", "target_price", # <--- 目標価格
+            "Confidence", "stop_loss_price", "target_price", # <--- 追加
             "Price", 
             "adx", "prev_adx", "ma_deviation", "rs_rating", 
             "vol_ratio", "expansion_rate", 
-            "dist_to_res",      # <--- 抵抗線距離
-            "days_to_earnings", # <--- 決算日数
-            "margin_ratio",     # <--- 信用倍率
+            "dist_to_res", "days_to_earnings", "margin_ratio", 
             "profit_rate"
         ]
         self.load_and_train()
@@ -309,11 +301,9 @@ class CaseBasedMemory:
         if not os.path.exists(self.csv_path): return
         try:
             self.df = pd.read_csv(self.csv_path)
-            # カラム不足補完
             for col in self.csv_columns:
                 if col not in self.df.columns: self.df[col] = 0.0
-        except Exception:
-            return 
+        except Exception: return
 
         try:
             self.df.columns = [c.strip() for c in self.df.columns]
@@ -372,6 +362,7 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, macro, news, weekly
     
     sector_trend_desc = f"{fund_data['sector']} (RS: {metrics['rs_rating']:.1f})"
     
+    # ★指定のプロンプト
     prompt = f"""
 ### ROLE
 あなたは「高ボラティリティ・トレンドフォロー特化型AI」です。
@@ -403,24 +394,19 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, macro, news, weekly
    - 抵抗線(resistance_price)を価格が上回っている、または抵抗線での攻防を制しつつあるか？
    - 抵抗線の直前(差が0〜1%程度)で止まっている場合は "HOLD" (反落リスク)。
    - 抵抗線を超えていれば "BUY" の確度アップ。
-
-2. **イベントリスク回避**:
-   - 決算(days_to_earnings)が 3日以内なら "HOLD" 推奨（ギャンブル回避）。
    
-3. **過熱感チェック**:
+2. **過熱感チェック**:
    - MA乖離率(ma_deviation)が +30% を超えている場合は "HOLD" (高値掴み警戒)。
 
-4. **需給とセクター**:
+3. **需給とセクター**:
    - セクター動向(RS)がプラスなら評価アップ。
 
 ### OUTPUT REQUIREMENT (JSON ONLY)
-Markdown記法は禁止。以下のキーを持つJSONのみを出力してください。
-
 {{
   "action": "BUY" or "HOLD",
   "confidence": 0-100,
-  "stop_loss": "推奨する損切り価格（整数。例: 1500）",
-  "target_price": "推奨する利確目標価格（整数。例: 1800）",
+  "stop_loss": "推奨する損切り価格（整数）",
+  "target_price": "推奨する利確目標価格（整数）",
   "reason": "判断理由(50文字以内)"
 }}
 """
@@ -432,7 +418,7 @@ Markdown記法は禁止。以下のキーを持つJSONのみを出力してく�
         if match: text = match.group(0)
         return json.loads(text)
     except Exception as e:
-        return {"action": "HOLD", "reason": f"AI Error: {e}", "confidence": 0, "stop_loss": 0, "target_price": 0}
+        return {"action": "HOLD", "reason": f"AI Error: {e}", "confidence": 0}
 
 def send_discord_notify(message, filename=None):
     if not webhook_url: return
@@ -452,7 +438,7 @@ def send_discord_notify(message, filename=None):
 # ==========================================
 if __name__ == "__main__":
     today = datetime.datetime.now().strftime('%Y-%m-%d')
-    print(f"=== AI市場監視システム [AGGRESSIVE MODE V2] ({today}) ===")
+    print(f"=== AI市場監視システム [AGGRESSIVE MODE V4] ({today}) ===")
     
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
     except Exception as e: print(f"Error: {e}"); exit()
@@ -473,7 +459,7 @@ if __name__ == "__main__":
     ]
 
     current_hour_jst = (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).hour
-    is_closing_time = (current_hour_jst >= 15) # 15時以降は記録モード
+    is_closing_time = (current_hour_jst >= 15)
     
     WATCH_LIST = sorted(list(set(WATCH_LIST)))
 
@@ -507,14 +493,15 @@ if __name__ == "__main__":
         action = res.get('action', 'HOLD')
         conf = res.get('confidence', 0)
         
-        # 損切り・利確設定 (AI提案があれば優先、なければATR計算)
+        # 損切り・利確設定
         ai_stop = res.get('stop_loss', 0)
         ai_target = res.get('target_price', 0)
         
         try: ai_stop = int(ai_stop)
         except: ai_stop = 0
         
-        stop_loss_price = ai_stop if ai_stop > 0 else (metrics['price'] - metrics['atr_value'] * 2.5)
+        # 損切りが提示されていなければ ATR x 1.8 を使用
+        stop_loss_price = ai_stop if ai_stop > 0 else (metrics['price'] - metrics['atr_value'] * 1.8)
         
         # CSVデータ作成 (全項目保存版)
         item = {
@@ -522,7 +509,7 @@ if __name__ == "__main__":
             "Action": action, "result": "", "Reason": res.get('reason', 'None'), 
             "Confidence": conf, 
             "stop_loss_price": stop_loss_price, 
-            "target_price": ai_target, # 目標価格
+            "target_price": ai_target, 
             "Price": metrics['price'], 
             "adx": metrics['adx'], 
             "prev_adx": metrics['prev_adx'],
@@ -530,9 +517,9 @@ if __name__ == "__main__":
             "rs_rating": metrics['rs_rating'], 
             "vol_ratio": metrics['vol_ratio'], 
             "expansion_rate": metrics['expansion_rate'],
-            "dist_to_res": metrics['dist_to_res'],       # 抵抗線距離
-            "days_to_earnings": fund_data['days_to_earnings'], # 決算日数
-            "margin_ratio": fund_data['margin_ratio'],   # 信用倍率
+            "dist_to_res": metrics['dist_to_res'], 
+            "days_to_earnings": fund_data['days_to_earnings'], 
+            "margin_ratio": fund_data['margin_ratio'],
             "profit_rate": 0.0 
         }
         
