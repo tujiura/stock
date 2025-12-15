@@ -15,31 +15,30 @@ import re
 import logging
 
 # ==========================================
-# ★設定エリア: V5改 (分割決済 & トレーリング緩和) バックテスト
+# ★設定エリア: V6改 (ホームラン狙い: 損小利大特化)
 # ==========================================
 START_DATE = "2023-01-01"
 END_DATE   = "2025-11-30"
 
-INITIAL_CAPITAL = 100000 # 10万円スタート
-RISK_PER_TRADE = 0.40      # リスク許容率
-MAX_POSITIONS = 10         # 最大保有銘柄数
-MAX_INVEST_RATIO = 0.5     # 1銘柄への集中投資制限 (20%まで)
+INITIAL_CAPITAL = 10000000 
+RISK_PER_TRADE = 0.20      
+MAX_POSITIONS = 10         
+MAX_INVEST_RATIO = 0.2     
 
-# ★ V5改 (Optimization) ロジックパラメータ
+# ★ V6改 (Home Run Strategy) ロジックパラメータ
 ATR_STOP_MULTIPLIER = 1.8      # 初期損切り幅 (ATR x 1.8)
-PARTIAL_PROFIT_TARGET = 0.035   # 分割利確ライン (+3.5%)
-PARTIAL_EXIT_RATIO = 0.5       # 分割利確割合 (50%)
-TRAILING_WIDE_MULTIPLIER = 2.5 # 分割後の追従幅 (ATR x 2.5 に広げる)
+TRAILING_TRIGGER = 0.10        # トレーリング開始ライン (+10%までは耐える)
+TRAILING_MULTIPLIER = 2.0      # トレーリング追従幅 (ATR x 2.0)
 
 # 保存ファイル名
-LOG_FILE = "ai_trade_memory_aggressive_v5_opt.csv" 
-HISTORY_CSV = "backtest_history_v5_opt.csv" 
+LOG_FILE = "ai_trade_memory_aggressive_v6.csv" 
+HISTORY_CSV = "backtest_history_v6_homerun.csv" 
 
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
 MODEL_NAME = 'models/gemini-2.0-flash'
 
-# 監視銘柄リスト (V4精鋭リスト)
+# 監視銘柄リスト
 TRAINING_LIST = [
     "6254.T", "8035.T", "2768.T", "6305.T", "6146.T",
     "6920.T", "6857.T", "7735.T", "6723.T", "6963.T", "3436.T", "6526.T", "6315.T",
@@ -345,7 +344,7 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
       "ticker": "銘柄コード",
       "action": "BUY",
       "shares": 購入株数 (整数),
-      "stop_loss": 損切り価格 (数値のみ),
+      "stop_loss": 損切り価格 (数値のみ。例: 1500),
       "reason": "選定理由を50文字以内で"
     }}
   ]
@@ -363,9 +362,9 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
 # 5. メイン実行
 # ==========================================
 def main():
-    print(f"=== 🧪 酸性試験 (V5改: Partial Exit & Wide Trail) ({START_DATE} ~ {END_DATE}) ===")
+    print(f"=== 🧪 酸性試験 (Home Run Strategy: A) ({START_DATE} ~ {END_DATE}) ===")
     print(f"初期資金: {INITIAL_CAPITAL:,.0f}円 | 損切: ATRx{ATR_STOP_MULTIPLIER}")
-    print(f"利確設定: +{PARTIAL_PROFIT_TARGET*100:.0f}%で{PARTIAL_EXIT_RATIO*100:.0f}%利確 -> 残りATRx{TRAILING_WIDE_MULTIPLIER}追従")
+    print(f"利確設定: +{TRAILING_TRIGGER*100}%超えまで我慢 -> 以降ATRx{TRAILING_MULTIPLIER}追従")
 
     memory = MemorySystem(LOG_FILE)
     try:
@@ -394,7 +393,7 @@ def main():
         return
 
     cash = INITIAL_CAPITAL
-    portfolio = {} # {ticker: {buy_price, shares, sl_price, max_price, atr, partial_exit_done}}
+    portfolio = {} # {ticker: {buy_price, shares, sl_price, max_price, atr}}
     trade_history = []
     equity_curve = []
     daily_history = []
@@ -419,7 +418,7 @@ def main():
             current_sl = float(pos['sl_price'])
             if day_low <= current_sl:
                 exec_price = current_sl
-                if day_open < current_sl: exec_price = day_open # ギャップダウン対応
+                if day_open < current_sl: exec_price = day_open # ギャップダウン
 
                 proceeds = exec_price * pos['shares']
                 cash += proceeds
@@ -432,43 +431,25 @@ def main():
                 closed_tickers.append(ticker)
                 continue
 
-            # --- 2. 分割利確判定 (Partial Profit Taking) ---
-            if not pos.get('partial_exit_done', False):
-                target_price_partial = pos['buy_price'] * (1 + PARTIAL_PROFIT_TARGET)
-                
-                if day_high >= target_price_partial:
-                    exec_price = day_open if day_open > target_price_partial else target_price_partial
-                    
-                    sell_shares = int(pos['shares'] * PARTIAL_EXIT_RATIO)
-                    if sell_shares > 0:
-                        proceeds = exec_price * sell_shares
-                        cash += proceeds
-                        profit = proceeds - (pos['buy_price'] * sell_shares)
-                        profit_rate = (exec_price - pos['buy_price']) / pos['buy_price'] * 100
-                        
-                        pos['shares'] -= sell_shares
-                        pos['partial_exit_done'] = True
-                        
-                        print(f"\n[{date_str}] 💰 分割利確 {ticker}: {sell_shares}株 @ {exec_price:.0f}円 ({profit_rate:+.2f}%) 残:{pos['shares']}株")
-                        trade_history.append({'Result': 'WIN', 'PL': profit, 'Type': 'Partial'})
-
-            # --- 3. トレーリングストップ更新 (Trailing Stop) ---
+            # --- 2. トレーリングストップ更新 (Home Run Logic) ---
             if day_high > pos['max_price']:
                 pos['max_price'] = day_high
             
-            # 分割利確済みなら ATR x 2.5 (ゆったり)、未なら ATR x 1.8 (標準)
-            current_multiplier = TRAILING_WIDE_MULTIPLIER if pos.get('partial_exit_done', False) else ATR_STOP_MULTIPLIER
+            # 現在の含み益率（最高値ベース）
+            profit_pct_high = (pos['max_price'] - pos['buy_price']) / pos['buy_price']
             
-            trail_dist = pos['atr'] * current_multiplier
-            new_sl = pos['max_price'] - trail_dist
-            
-            # 建値保証 (+3%以上伸びたら)
-            profit_pct_max = (pos['max_price'] - pos['buy_price']) / pos['buy_price']
-            if pos.get('partial_exit_done', False) or profit_pct_max > 0.03:
-                 new_sl = max(new_sl, pos['buy_price'] * 1.002)
-            
-            if new_sl > pos['sl_price']:
-                pos['sl_price'] = new_sl
+            # ★ +10% を超えるまではストップを動かさない（初期損切りで耐える）
+            if profit_pct_high > TRAILING_TRIGGER:
+                # +10%超えたら、ATR x 2.0 で追従開始
+                trail_dist = pos['atr'] * TRAILING_MULTIPLIER
+                new_sl = pos['max_price'] - trail_dist
+                
+                # 建値保証 (+15%以上伸びたら)
+                if profit_pct_high > 0.15:
+                     new_sl = max(new_sl, pos['buy_price'] * 1.005) # 手数料+α確保
+                
+                if new_sl > pos['sl_price']:
+                    pos['sl_price'] = new_sl
 
         for t in closed_tickers: del portfolio[t]
 
@@ -534,8 +515,7 @@ def main():
                                 
                                 portfolio[tic] = {
                                     'buy_price': metrics['price'], 'shares': shares,
-                                    'sl_price': initial_sl, 'max_price': metrics['price'], 'atr': atr_val,
-                                    'partial_exit_done': False # フラグ初期化
+                                    'sl_price': initial_sl, 'max_price': metrics['price'], 'atr': atr_val
                                 }
                                 print(f"\n[{date_str}] 🔴 新規 {tic}: {shares}株 (約{cost:,.0f}円)")
 
