@@ -34,24 +34,25 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
 
-# ★ファイル名をV7_VOLに変更
+# ★ファイル名をV7に変更
 LOG_FILE = "ai_trade_memory_aggressive_v7.csv" 
 MODEL_NAME = 'models/gemini-2.0-flash'
 
-TRAINING_ROUNDS = 20000
+TRAINING_ROUNDS = 10000  # トレーニング回数
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
-TRADE_BUDGET = 100000  # 1トレードあたりの投資金額 (10万円)
+TRADE_BUDGET = 1000000 
 
-# ★ V7 (Sniper Strategy) パラメータ
-ATR_STOP_MULTIPLIER = 1.8      
-TRAILING_TRIGGER = 0.10        
-TRAILING_MULTIPLIER = 2.0      
+# ★ V7 (Sniper & Home Run) ロジックパラメータ
+ATR_STOP_MULTIPLIER = 1.8      # 初期損切り幅 (ATR x 1.8)
+TRAILING_TRIGGER = 0.10        # トレーリング開始ライン (+10%までは耐える)
+TRAILING_MULTIPLIER = 2.0      # トレーリング追従幅 (ATR x 2.0)
 
+# 鉄の掟用
 MA_DEV_DANGER_LOW = 10.0     
 MA_DEV_DANGER_HIGH = 15.0    
 
-# トレーニングリスト
+# トレーニング対象リスト
 TRAINING_LIST = [
     "6254.T", "8035.T", "2768.T", "6305.T", "6146.T",
     "6920.T", "6857.T", "7735.T", "6723.T", "6963.T", "3436.T", "6526.T", "6315.T",
@@ -70,7 +71,7 @@ plt.rcParams['font.family'] = 'sans-serif'
 genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
 
 # ==========================================
-# 1. データ取得 & テクニカル計算 (V7強化版)
+# 1. データ取得 & テクニカル計算
 # ==========================================
 def download_data_safe(ticker, period="5y", interval="1d", retries=3): 
     wait = 2
@@ -123,14 +124,14 @@ def calculate_technical_indicators(df):
     loss = (-delta.where(delta < 0, 0)).rolling(9).mean()
     df['RSI9'] = 100 - (100 / (1 + gain/loss))
 
-    # 4. MACD (12, 26, 9)
+    # ★追加 4. MACD (12, 26, 9)
     exp12 = close.ewm(span=12, adjust=False).mean()
     exp26 = close.ewm(span=26, adjust=False).mean()
     df['MACD'] = exp12 - exp26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['Signal']
 
-    # 5. 一目均衡表 (雲のみ)
+    # ★追加 5. 一目均衡表 (雲のみ簡易計算)
     high9 = high.rolling(9).max(); low9 = low.rolling(9).min()
     tenkan = (high9 + low9) / 2
     high26 = high.rolling(26).max(); low26 = low.rolling(26).min()
@@ -156,8 +157,9 @@ def calculate_metrics_for_training(df, idx):
     prev_width = float(df['BB_Width'].iloc[idx-5]) if df['BB_Width'].iloc[idx-5] > 0 else 0.1
     expansion_rate = bb_width / prev_width
     
-    # ★出来高推移の生成 (5日分)
-    # Vol_Ratio = Volume / Vol_MA20
+    vol_ratio = float(curr['Volume']) / float(curr['Vol_MA20']) if float(curr['Vol_MA20']) > 0 else 0
+    
+    # 出来高履歴
     vol_history = []
     for i in range(4, -1, -1):
         if idx-i >= 0:
@@ -165,8 +167,7 @@ def calculate_metrics_for_training(df, idx):
             vr = float(row['Volume']) / float(row['Vol_MA20']) if float(row['Vol_MA20']) > 0 else 0
             vol_history.append(f"{vr:.1f}")
     vol_history_str = "->".join(vol_history)
-    vol_ratio = float(curr['Volume']) / float(curr['Vol_MA20']) if float(curr['Vol_MA20']) > 0 else 0
-    
+
     macd = float(curr['MACD'])
     macd_hist = float(curr['MACD_Hist'])
     prev_hist = float(df['MACD_Hist'].iloc[idx-1])
@@ -190,7 +191,7 @@ def calculate_metrics_for_training(df, idx):
         'plus_di': float(curr['PlusDI']),
         'minus_di': float(curr['MinusDI']),
         'vol_ratio': vol_ratio,
-        'vol_history': vol_history_str, # ★追加
+        'vol_history': vol_history_str,
         'expansion_rate': expansion_rate,
         'atr_value': float(curr['ATR']),
         'macd_val': macd,
@@ -211,6 +212,7 @@ def check_iron_rules(metrics):
         return f"DangerZone({ma_dev:.1f}%)"
     if metrics['adx'] > 55: return "ADX Overheat"
     
+    # ★追加: 雲の下でのロングは禁止
     if metrics['price_vs_cloud'] == "Below": return "Below Ichimoku Cloud"
     
     return None
@@ -278,7 +280,6 @@ class CaseBasedMemory:
         new_df = pd.DataFrame([data_dict])
         for col in self.csv_columns:
             if col not in new_df.columns: new_df[col] = None
-        # 不要なカラム（内部計算用）を除外して保存
         save_cols = [c for c in self.csv_columns if c in new_df.columns]
         new_df = new_df[save_cols]
         
@@ -318,66 +319,49 @@ def create_chart_image(df, name):
 def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
     if metrics['adx'] < 20: return {"action": "HOLD", "reason": "ADX<20"}
     
-    # ★V7 改良プロンプト (Volume History追加)
     prompt = f"""
-# ROLE
-あなたは世界最高峰の「クオンツ・テクニカルアナリスト」であり、高精度のトレンドフォロー戦略を実行するAIエージェントです。
-あなたの使命は、提供されたデータに基づき、感情を排して数学的かつ論理的にトレード判断を下すことです。
-特に「ダマシ（False Breakout）」を回避し、優位性（Edge）のあるエントリーポイントのみを厳選します。
+### ROLE
+あなたは「高精度スナイパー・トレンドフォローAI」です。
+ダマシ(False Breakout)を極限まで回避し、本物のトレンド初動のみを狙撃します。
 
-# CONTEXT & OBJECTIVE
-ユーザーは、以下の銘柄について「買い（BUY）」か「見送り（HOLD）」かの二択の判断を求めています。
-曖昧な状況や、リスクリワード比が悪い局面では、資産を守るために迷わず「HOLD」を選択する必要があります。
+### INPUT DATA
+銘柄: {ticker} (現在価格: {metrics['price']:.0f}円)
 
-# INPUT DATA
-## 対象銘柄
-* Ticker: {ticker}
-* Current Price: {metrics['price']:.0f} JPY
+[基本指標]
+1. Trend (ADX): {metrics['adx']:.1f} (閾値25以上)
+2. Direction: +DI({metrics['plus_di']:.1f}) vs -DI({metrics['minus_di']:.1f})
+3. Volatility: {metrics['expansion_rate']:.2f}倍 (スクイーズからの拡大が良い)
+4. Volume: {metrics['vol_ratio']:.2f}倍
+   - 推移: {metrics['vol_history']}
 
-## 1. Technical Indicators (Quantitative)
-* **Trend Strength ($ADX$):** {metrics['adx']:.1f} (Threshold: $\ge 25$)
-* **Directional Movement:** $+DI$ = {metrics['plus_di']:.1f} vs $-DI$ = {metrics['minus_di']:.1f}
-* **Volatility Expansion:** {metrics['expansion_rate']:.2f}x (Squeeze $\\to$ Expansion is ideal)
-* **Volume Ratio:** {metrics['vol_ratio']:.2f}x (Trend: {metrics['vol_history']})
-* **MACD:** Histogram = {metrics['macd_hist']:.2f} ({metrics['macd_trend']})
-* **Ichimoku Cloud:** Price is **{metrics['price_vs_cloud']}** the Cloud.
-* **Resistance Distance:** {metrics['dist_to_res']:.1f}%
+[★ダマシ回避・精密検査]
+1. **MACD**: Hist={metrics['macd_hist']:.2f} ({metrics['macd_trend']})
+   - ヒストグラムがプラス圏で拡大中なら強い。マイナスなら警戒。
+2. **Ichimoku Cloud**: Price is {metrics['price_vs_cloud']} the Cloud.
+   - 雲の下(Below)での買いは自殺行為のため禁止。
+3. **Candle Shape**: {metrics['candle_shape']}
+   - 長い上ヒゲ(Bad)は売り圧力の証明。大陽線(Good)が理想。
+4. **Resistance**: 距離 {metrics['dist_to_res']:.1f}%
 
-## 2. Qualitative Factors (Price Action & Environment)
-* **Candle Shape:** {metrics['candle_shape']}
-
-## 3. External Factors
 {cbr_text}
 
-# STRICT EVALUATION RULES (AND/OR LOGIC)
-判断を下す際は、以下の論理ゲートを厳守してください。
+### EVALUATION LOGIC
+- **BUY条件**:
+  1. 抵抗線を明確に超えている、または直前でMACD等のモメンタムが強い。
+  2. 価格が「雲」の上にあること (必須)。
+  3. 出来高が伴って増加傾向にあること。
 
-1.  **Trend Filter (Must Pass):**
-    * 価格が「一目均衡表の雲」の上にあること（$Price > Cloud$）。これが満たされない場合、**即座にHOLD**とする。
-    * トレンドの強さ（$ADX$）が基準を満たしている、または勢いが増していること。
+- **HOLD条件**:
+  - 上記のいずれかに懸念がある場合。特に「上ヒゲ」や「雲の下」は即HOLD。
 
-2.  **Momentum Trigger:**
-    * MACDヒストグラムが拡大傾向、かつプラス圏にあることが望ましい。
-    * 出来高（Volume）が増加傾向にあり、値動きを裏付けていること。
-
-3.  **Risk Check:**
-    * 長い上ヒゲ（Selling Pressure）が出現していないか？
-    * 決算発表が直近（3日以内など）に迫っていないか？
-    * 抵抗線（Resistance）が極端に近くないか？
-
-# OUTPUT FORMAT
-回答は**JSON形式のみ**で出力してください。Markdownのコードブロックや説明文は一切不要です。
-
+### OUTPUT REQUIREMENT (JSON ONLY)
 {{
   "action": "BUY" or "HOLD",
-  "confidence": 0-100 (Integer),
-  "stop_loss": {metrics['price'] * 0.95:.0f},  // 例: 現在価格から計算、またはロジックで算出
-  "target_price": {metrics['price'] * 1.10:.0f}, // 例: リスクリワード1:2などを想定
-  "reason": "判断の決定的な理由を簡潔に記述 (Max 60 chars)"
+  "confidence": 0-100,
+  "stop_loss": "推奨する損切り価格（整数）",
+  "target_price": "推奨する利確目標株価（整数）",
+  "reason": "判断理由(50文字以内)"
 }}
-
-# FINAL INSTRUCTION
-情け容赦ないプロの視点で分析し、JSONデータのみを返してください。
 """
     safety = {HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
     try:
@@ -394,7 +378,7 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
 # ==========================================
 def main():
     start_time = time.time()
-    print(f"=== AI強化合宿 [AGGRESSIVE V7] (Sniper Precision + Vol History) ===")
+    print(f"=== AI強化合宿 [AGGRESSIVE V7] (Sniper Precision Mode) ===")
     
     memory_system = CaseBasedMemory(LOG_FILE) 
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
@@ -424,6 +408,7 @@ def main():
         target_idx = random.randint(100, len(df) - 65) 
         metrics = calculate_metrics_for_training(df, target_idx)
         
+        # 鉄の掟チェック (V7版: 雲の下も弾く)
         iron_rule = check_iron_rules(metrics)
         if iron_rule: continue
 
@@ -464,11 +449,13 @@ def main():
         for _, row in future_prices.iterrows():
             high = row['High']; low = row['Low']; close = row['Close']
             
+            # 1. 損切り判定
             if low <= current_stop_loss:
                 is_loss = True
                 final_exit_price = current_stop_loss
                 break
             
+            # 2. トレーリングストップ (ホームラン型)
             if high > max_price:
                 max_price = high
             
@@ -513,12 +500,12 @@ def main():
             'adx': metrics['adx'], 
             'prev_adx': metrics['prev_adx'],
             'ma_deviation': metrics['ma_deviation'], 
-            'rs_rating': 0, 
+            'rs_rating': 0, # Placeholder
             'vol_ratio': metrics['vol_ratio'], 
             'expansion_rate': metrics['expansion_rate'],
             'dist_to_res': metrics['dist_to_res'], 
-            'days_to_earnings': 999, 
-            'margin_ratio': 1.0, 
+            'days_to_earnings': 999, # Placeholder
+            'margin_ratio': 1.0, # Placeholder
             'profit_rate': profit_rate 
         }
         memory_system.save_experience(save_data)

@@ -20,10 +20,10 @@ import logging
 START_DATE = "2023-01-01"
 END_DATE   = "2025-11-30"
 
-INITIAL_CAPITAL = 10000000 
-RISK_PER_TRADE = 0.20      
+INITIAL_CAPITAL = 100000 
+RISK_PER_TRADE = 0.40      
 MAX_POSITIONS = 10         
-MAX_INVEST_RATIO = 0.2     
+MAX_INVEST_RATIO = 0.4    
 
 # ★ V7 ロジックパラメータ
 ATR_STOP_MULTIPLIER = 1.8      # 初期損切り幅 (ATR x 1.8)
@@ -162,6 +162,12 @@ def calculate_metrics_at_date(df, idx):
     recent_high = df['High'].iloc[idx-60:idx].max()
     dist_to_res = ((price - recent_high) / recent_high) * 100 if recent_high > 0 else 0
     
+    adx = float(curr['ADX'])
+    prev_adx = float(df['ADX'].iloc[idx-1])
+    
+    sma25 = float(curr['SMA25'])
+    ma_deviation = ((price / sma25) - 1) * 100
+    
     bb_width = float(curr['BB_Width'])
     prev_width = float(df['BB_Width'].iloc[idx-5]) if df['BB_Width'].iloc[idx-5] > 0 else 0.1
     expansion_rate = bb_width / prev_width
@@ -195,9 +201,9 @@ def calculate_metrics_at_date(df, idx):
     return {
         'price': price,
         'dist_to_res': dist_to_res,
-        'ma_deviation': ((price / float(curr['SMA25'])) - 1) * 100,
-        'adx': float(curr['ADX']),
-        'prev_adx': float(df['ADX'].iloc[idx-1]),
+        'ma_deviation': ma_deviation,
+        'adx': adx,
+        'prev_adx': prev_adx,
         'plus_di': float(curr['PlusDI']),
         'minus_di': float(curr['MinusDI']),
         'vol_ratio': vol_ratio,
