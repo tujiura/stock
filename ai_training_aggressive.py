@@ -38,7 +38,7 @@ if not GOOGLE_API_KEY:
 LOG_FILE = "ai_trade_memory_aggressive_v7.csv" 
 MODEL_NAME = 'models/gemini-2.0-flash'
 
-TRAINING_ROUNDS = 10000  # トレーニング回数
+TRAINING_ROUNDS = 20000  # トレーニング回数
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
 TRADE_BUDGET = 1000000 

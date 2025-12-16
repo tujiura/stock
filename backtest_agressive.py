@@ -17,8 +17,8 @@ import logging
 # ==========================================
 # ★設定エリア: V7 (Sniper & Home Run) バックテスト
 # ==========================================
-START_DATE = "2023-01-01"
-END_DATE   = "2025-11-30"
+START_DATE = "2020-01-01"
+END_DATE   = "2022-12-31"
 
 INITIAL_CAPITAL = 100000 
 RISK_PER_TRADE = 0.40      
