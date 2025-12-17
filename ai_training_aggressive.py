@@ -34,21 +34,28 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
 
-# ★ファイル名をV7に変更
-LOG_FILE = "ai_trade_memory_aggressive_v7.csv" 
-MODEL_NAME = 'models/gemini-2.0-flash'
+# ★ファイル名をV8に変更
+LOG_FILE = "ai_trade_memory_aggressive_v8.csv" 
+MODEL_NAME = 'models/gemini-2.5-flash'
 
-TRAINING_ROUNDS = 20000  # トレーニング回数
+TRAINING_ROUNDS = 40000
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
 TRADE_BUDGET = 1000000 
 
-# ★ V7 (Sniper & Home Run) ロジックパラメータ
-ATR_STOP_MULTIPLIER = 1.8      # 初期損切り幅 (ATR x 1.8)
-TRAILING_TRIGGER = 0.10        # トレーリング開始ライン (+10%までは耐える)
-TRAILING_MULTIPLIER = 2.0      # トレーリング追従幅 (ATR x 2.0)
+# ★ V8 (Adaptive Guerrilla) パラメータ
+ADX_THRESHOLD = 30.0           # 戦時/平時の分岐点
 
-# 鉄の掟用
+# [A] ゲリラモード (ADX < 30)
+GUERRILLA_TARGET = 0.05        # 固定利確 +5%
+GUERRILLA_STOP_MULT = 1.5      # タイトな損切り (ATR x 1.5)
+
+# [B] ホームランモード (ADX >= 30)
+HOMERUN_STOP_MULT = 1.8        # 初期損切り (ATR x 1.8)
+HOMERUN_TRAIL_TRIGGER = 0.10   # トレーリング開始 (+10%)
+HOMERUN_TRAIL_MULT = 2.0       # 追従幅 (ATR x 2.0)
+
+# 鉄の掟
 MA_DEV_DANGER_LOW = 10.0     
 MA_DEV_DANGER_HIGH = 15.0    
 
@@ -124,14 +131,14 @@ def calculate_technical_indicators(df):
     loss = (-delta.where(delta < 0, 0)).rolling(9).mean()
     df['RSI9'] = 100 - (100 / (1 + gain/loss))
 
-    # ★追加 4. MACD (12, 26, 9)
+    # 4. MACD
     exp12 = close.ewm(span=12, adjust=False).mean()
     exp26 = close.ewm(span=26, adjust=False).mean()
     df['MACD'] = exp12 - exp26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['Signal']
 
-    # ★追加 5. 一目均衡表 (雲のみ簡易計算)
+    # 5. 一目均衡表 (雲)
     high9 = high.rolling(9).max(); low9 = low.rolling(9).min()
     tenkan = (high9 + low9) / 2
     high26 = high.rolling(26).max(); low26 = low.rolling(26).min()
@@ -159,7 +166,6 @@ def calculate_metrics_for_training(df, idx):
     
     vol_ratio = float(curr['Volume']) / float(curr['Vol_MA20']) if float(curr['Vol_MA20']) > 0 else 0
     
-    # 出来高履歴
     vol_history = []
     for i in range(4, -1, -1):
         if idx-i >= 0:
@@ -212,7 +218,6 @@ def check_iron_rules(metrics):
         return f"DangerZone({ma_dev:.1f}%)"
     if metrics['adx'] > 55: return "ADX Overheat"
     
-    # ★追加: 雲の下でのロングは禁止
     if metrics['price_vs_cloud'] == "Below": return "Below Ichimoku Cloud"
     
     return None
@@ -228,13 +233,15 @@ class CaseBasedMemory:
         self.df = pd.DataFrame()
         self.feature_cols = ['adx', 'prev_adx', 'ma_deviation', 'vol_ratio', 'expansion_rate', 'dist_to_res']
         
+        # 保存カラム (Strategy_Mode追加)
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "target_price", 
             "Actual_High", "Target_Diff", "Target_Reach",
             "Price", "adx", "prev_adx", "ma_deviation", "rs_rating", 
             "vol_ratio", "expansion_rate", "dist_to_res", 
-            "days_to_earnings", "margin_ratio", "profit_rate"
+            "days_to_earnings", "margin_ratio", "profit_rate",
+            "Strategy_Mode" # <--- 新規追加
         ]
         self.load_and_train()
 
@@ -309,7 +316,7 @@ def create_chart_image(df, name):
         ax1.plot(data.index, data['Cloud_Top'], color='blue', alpha=0.2, label='Cloud Top')
         ax1.fill_between(data.index, data['Cloud_Top'], data['Close'].min(), color='blue', alpha=0.05)
 
-    ax1.set_title(f"{name} V7 Sniper Chart")
+    ax1.set_title(f"{name} V8 Hybrid Chart")
     ax1.legend(); ax1.grid(True, alpha=0.3)
     ax2.bar(data.index, data['Volume'], color='gray', alpha=0.5)
     
@@ -374,11 +381,11 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
         return {"action": "HOLD", "reason": "AI Error", "confidence": 0}
 
 # ==========================================
-# 4. メイン実行 (トレーニングモード)
+# 4. メイン実行 (トレーニングモード: V8 Adaptive)
 # ==========================================
 def main():
     start_time = time.time()
-    print(f"=== AI強化合宿 [AGGRESSIVE V7] (Sniper Precision Mode) ===")
+    print(f"=== AI強化合宿 [AGGRESSIVE V8] (Adaptive Guerrilla) ===")
     
     memory_system = CaseBasedMemory(LOG_FILE) 
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
@@ -408,7 +415,6 @@ def main():
         target_idx = random.randint(100, len(df) - 65) 
         metrics = calculate_metrics_for_training(df, target_idx)
         
-        # 鉄の掟チェック (V7版: 雲の下も弾く)
         iron_rule = check_iron_rules(metrics)
         if iron_rule: continue
 
@@ -422,54 +428,79 @@ def main():
 
         if action == "HOLD": continue
 
-        print(f"Round {i:03}: {ticker} -> BUY 🔴 (自信:{conf}%)")
-
         entry_price = float(metrics['price'])
         atr = metrics['atr_value']
         
-        ai_stop = decision.get('stop_loss', 0)
-        ai_target = decision.get('target_price', 0)
-        try: ai_stop = int(ai_stop); ai_target = int(ai_target)
-        except: ai_stop = 0; ai_target = 0
+        # ★モード判定 (V8)
+        strategy_mode = 'HOMERUN' if metrics['adx'] >= ADX_THRESHOLD else 'GUERRILLA'
         
-        current_stop_loss = ai_stop if ai_stop > 0 else entry_price - (atr * ATR_STOP_MULTIPLIER)
+        # 初期損切り設定
+        ai_stop = decision.get('stop_loss', 0)
+        try: ai_stop = int(ai_stop)
+        except: ai_stop = 0
+        
+        if strategy_mode == 'GUERRILLA':
+            initial_stop_mult = GUERRILLA_STOP_MULT
+        else:
+            initial_stop_mult = HOMERUN_STOP_MULT
+            
+        current_stop_loss = ai_stop if ai_stop > 0 else entry_price - (atr * initial_stop_mult)
+        
+        print(f"Round {i:03}: {ticker} -> BUY ({strategy_mode}) 🔴")
         
         shares = int(TRADE_BUDGET // entry_price)
         if shares < 1: shares = 1
         
-        # --- シミュレーション (ホームラン狙い) ---
+        # --- シミュレーション ---
         future_prices = df.iloc[target_idx+1 : target_idx+61]
         result = "DRAW"
         final_exit_price = entry_price
         max_price = entry_price
         is_loss = False
+        is_win = False
         
         actual_high = future_prices['High'].max()
         
         for _, row in future_prices.iterrows():
             high = row['High']; low = row['Low']; close = row['Close']
+            day_open = row['Open']
             
             # 1. 損切り判定
             if low <= current_stop_loss:
                 is_loss = True
-                final_exit_price = current_stop_loss
+                exec_price = current_stop_loss
+                if day_open < current_stop_loss: exec_price = day_open
+                final_exit_price = exec_price
                 break
             
-            # 2. トレーリングストップ (ホームラン型)
-            if high > max_price:
-                max_price = high
+            # 2. 利確・トレーリング更新 (モード別)
+            if strategy_mode == 'GUERRILLA':
+                # 固定利確 (+5%)
+                target_p = entry_price * (1 + GUERRILLA_TARGET)
+                if high >= target_p:
+                    is_win = True
+                    exec_price = target_p
+                    if day_open > target_p: exec_price = day_open
+                    final_exit_price = exec_price
+                    break
             
-            profit_pct_high = (max_price - entry_price) / entry_price
-            
-            if profit_pct_high > TRAILING_TRIGGER:
-                trail_dist = atr * TRAILING_MULTIPLIER
-                new_stop = max_price - trail_dist
-                if profit_pct_high > 0.15:
-                     new_stop = max(new_stop, entry_price * 1.005)
-                if new_stop > current_stop_loss:
-                    current_stop_loss = new_stop
+            else: # HOMERUN MODE
+                if high > max_price:
+                    max_price = high
+                
+                profit_pct_high = (max_price - entry_price) / entry_price
+                
+                # +10%超えまでは動かさない
+                if profit_pct_high > HOMERUN_TRAIL_TRIGGER:
+                    trail_dist = atr * HOMERUN_TRAIL_MULT
+                    new_stop = max_price - trail_dist
+                    if profit_pct_high > 0.15:
+                         new_stop = max(new_stop, entry_price * 1.005)
+                    
+                    if new_stop > current_stop_loss:
+                        current_stop_loss = new_stop
 
-        if not is_loss:
+        if not is_loss and not is_win:
             final_exit_price = future_prices['Close'].iloc[-1]
 
         profit_loss = (final_exit_price - entry_price) * shares
@@ -478,14 +509,19 @@ def main():
         if profit_loss > 0: result = "WIN"; win_count += 1
         elif profit_loss < 0: result = "LOSS"; loss_count += 1
 
-        print(f"   結果: {result} (PL: {profit_loss:+.0f}円 / {profit_rate:+.2f}%) Tgt:{ai_target} ActHigh:{actual_high:.0f}")
-
+        # AIの目標価格 (記録用)
+        ai_target = decision.get('target_price', 0)
+        try: ai_target = int(ai_target)
+        except: ai_target = 0
+        
         target_diff = actual_high - ai_target if ai_target > 0 else 0
         target_reach = 0
         if ai_target > 0:
             upside = ai_target - entry_price
             act_up = actual_high - entry_price
             if upside > 0: target_reach = (act_up / upside) * 100
+
+        print(f"   結果: {result} (PL: {profit_loss:+.0f}円 / {profit_rate:+.2f}%)")
 
         save_data = {
             'Date': df.index[target_idx].strftime('%Y-%m-%d'), 
@@ -500,13 +536,14 @@ def main():
             'adx': metrics['adx'], 
             'prev_adx': metrics['prev_adx'],
             'ma_deviation': metrics['ma_deviation'], 
-            'rs_rating': 0, # Placeholder
+            'rs_rating': 0, 
             'vol_ratio': metrics['vol_ratio'], 
             'expansion_rate': metrics['expansion_rate'],
             'dist_to_res': metrics['dist_to_res'], 
-            'days_to_earnings': 999, # Placeholder
-            'margin_ratio': 1.0, # Placeholder
-            'profit_rate': profit_rate 
+            'days_to_earnings': 999, 
+            'margin_ratio': 1.0, 
+            'profit_rate': profit_rate,
+            'Strategy_Mode': strategy_mode # ★モード記録
         }
         memory_system.save_experience(save_data)
         time.sleep(1)

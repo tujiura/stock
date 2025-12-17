@@ -8,13 +8,13 @@ import os
 # ★設定エリア
 # ==========================================
 FILES = {
-    "🎯 攻撃型 V7 (Sniper: MACD/雲)": "ai_trade_memory_aggressive_v7.csv",
-    "🚀 攻撃型 V6 (ホームラン狙い)": "ai_trade_memory_aggressive_v6.csv",
+    "🎯 攻撃型 V8 (Sniper: MACD/雲)": "ai_trade_memory_aggressive_v8.csv",
+    "🚀 攻撃型 V7 (ホームラン狙い)": "ai_trade_memory_aggressive_v7.csv",
     "🔥 攻撃型 V5 (分割決済)": "ai_trade_memory_aggressive_v5.csv",
     "🛡️ 資産防衛型": "ai_trade_memory_risk_managed.csv",
 }
 
-PAGE_TITLE = "📊 AI Trade Analysis Dashboard V7"
+PAGE_TITLE = "📊 AI Trade Analysis Dashboard V8"
 LAYOUT = "wide"
 
 # ==========================================
