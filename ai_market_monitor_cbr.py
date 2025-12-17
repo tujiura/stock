@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import json
 import datetime
@@ -10,11 +11,10 @@ import google.generativeai as genai
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-import io
 import re
 import logging
 import socket
-import requests  # 追加
+import requests
 import requests.packages.urllib3.util.connection as urllib3_cn
 from scipy.signal import argrelextrema
 import warnings
@@ -35,11 +35,10 @@ except ImportError:
     pass
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
-
-# ★ Discord Webhook URL (環境変数から読み込み)
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 # 設定
 LOG_FILE = "ai_trade_memory_aggressive_v11.csv" 
@@ -52,7 +51,7 @@ CHOP_THRESHOLD_RANGE = 61.8
 ATR_MULTIPLIER = 2.5
 VWAP_WINDOW = 20
 
-# 監視リスト (Core + Growth)
+# 監視リスト
 WATCH_LIST = [
     "8035.T", "6857.T", "6146.T", "6920.T", "6758.T", "6702.T", "6501.T", "6503.T", "7751.T", "4063.T", "6981.T", "6723.T",
     "7203.T", "7267.T", "6902.T", "6301.T", "6367.T", "7011.T", "7013.T", 
@@ -64,7 +63,6 @@ WATCH_LIST = [
     "2768.T", "7342.T", "2413.T", "2222.T", "7532.T", "3092.T",
     "9101.T", "9104.T", "9107.T", "1605.T", "5713.T", "5401.T", "5411.T"
 ]
-# 重複除去
 WATCH_LIST = sorted(list(set(WATCH_LIST)))
 
 plt.rcParams['font.family'] = 'sans-serif'
@@ -79,27 +77,20 @@ def send_discord_notify(message, filename=None):
         return
     try:
         now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-        # メッセージが長すぎる場合は分割するか、ファイルに添付するなどの処理が必要ですが、
-        # ここでは簡易的に先頭2000文字(Discord制限)に切り詰めます。
         content = f"🚀 **AI市場監視レポート V11 ({now_str})**\n{message[:1900]}"
+        if len(message) > 1900: content += "\n...(省略されました)"
         
         payload = {"content": content}
         files = {}
-        
-        # テキストファイルとして添付する場合（長いレポート用）
         if filename:
-            # メッセージ本文をファイル化して添付
             files["file"] = (f"MarketReport_{now_str.replace(':','-')}.txt", message.encode('utf-8'))
-            # ファイル添付時は本文を短くする
-            payload["content"] = f"🚀 **AI市場監視レポート V11 ({now_str})**\n詳細は添付ファイルを確認してください。"
 
         response = requests.post(DISCORD_WEBHOOK_URL, data=payload, files=files if filename else None)
         
         if response.status_code in [200, 204]:
             print("✅ Discord通知送信成功")
         else:
-            print(f"⚠️ Discord送信エラー: {response.status_code} - {response.text}")
-            
+            print(f"⚠️ Discord送信エラー: {response.status_code}")
     except Exception as e:
         print(f"⚠️ Discord送信例外: {e}")
 
@@ -130,12 +121,10 @@ def get_fundamentals(ticker):
         info = t.info
         return {
             'PER': info.get('trailingPE', None),
-            'PBR': info.get('priceToBook', None),
-            'ROE': info.get('returnOnEquity', None),
-            'MarketCap': info.get('marketCap', None)
+            'PBR': info.get('priceToBook', None)
         }
     except:
-        return {'PER': None, 'PBR': None, 'ROE': None, 'MarketCap': None}
+        return {'PER': None, 'PBR': None}
 
 def calculate_technical_indicators_v11(df):
     try:
@@ -275,9 +264,9 @@ def check_iron_rules_v11(metrics):
     return None
 
 # ==========================================
-# 2. CBR & AI
+# 2. メモリシステム (MemorySystem)
 # ==========================================
-class CaseBasedMemory:
+class MemorySystem:
     def __init__(self, csv_path):
         self.csv_path = csv_path
         self.scaler = StandardScaler()
@@ -287,7 +276,9 @@ class CaseBasedMemory:
         self.load_and_train()
 
     def load_and_train(self):
-        if not os.path.exists(self.csv_path): return
+        if not os.path.exists(self.csv_path):
+            print(f"⚠️ 学習データ {self.csv_path} が見つかりません。")
+            return
         try:
             self.df = pd.read_csv(self.csv_path)
             self.df.columns = [c.strip() for c in self.df.columns]
@@ -302,47 +293,54 @@ class CaseBasedMemory:
                     global CBR_NEIGHBORS_COUNT
                     self.knn = NearestNeighbors(n_neighbors=min(CBR_NEIGHBORS_COUNT, len(valid_df)), metric='euclidean')
                     self.knn.fit(self.features_normalized)
-        except Exception: pass
+        except Exception as e:
+            print(f"⚠️ メモリ読み込みエラー: {e}")
 
     def get_similar_cases_text(self, current_metrics):
-        if self.knn is None: return "（データ不足）"
-        vec = [current_metrics.get(col, 0) for col in self.feature_cols]
-        input_df = pd.DataFrame([vec], columns=self.feature_cols)
-        dists, indices = self.knn.kneighbors(self.scaler.transform(input_df))
-        
-        text = f"【類似局面(過去)】\n"
-        win_c = 0; loss_c = 0
-        for idx in indices[0]:
-            row = self.valid_df_for_knn.iloc[idx]
-            res = str(row.get('result', ''))
-            if res == 'WIN': win_c += 1
-            if res == 'LOSS': loss_c += 1
-        rate = win_c / (win_c + loss_c) * 100 if (win_c + loss_c) > 0 else 0
-        text += f"-> 勝率: {rate:.0f}% (勝{win_c}/負{loss_c})\n"
-        return text
+        if self.knn is None: return "（データ不足のため参照なし）"
+        try:
+            vec = [current_metrics.get(col, 0) for col in self.feature_cols]
+            input_df = pd.DataFrame([vec], columns=self.feature_cols)
+            dists, indices = self.knn.kneighbors(self.scaler.transform(input_df))
+            text = f"【類似局面(過去)】\n"
+            win_c = 0; loss_c = 0
+            for idx in indices[0]:
+                row = self.valid_df_for_knn.iloc[idx]
+                res = str(row.get('result', ''))
+                if res == 'WIN': win_c += 1
+                if res == 'LOSS': loss_c += 1
+            rate = win_c / (win_c + loss_c) * 100 if (win_c + loss_c) > 0 else 0
+            text += f"-> 勝率: {rate:.0f}% (勝{win_c}/負{loss_c})\n"
+            return text
+        except: return "（検索エラー）"
 
+# ==========================================
+# 3. AIエージェント
+# ==========================================
 def create_chart_image(df, name):
-    data = df.tail(80).copy()
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
-    
-    sma20 = data['Close'].rolling(20).mean()
-    std20 = data['Close'].rolling(20).std()
-    ax1.plot(data.index, data['Close'], color='black', label='Close')
-    ax1.plot(data.index, sma20 + 2*std20, color='green', alpha=0.5, linestyle='--', label='+2σ')
-    ax1.plot(data.index, sma20 - 2*std20, color='green', alpha=0.5, linestyle='--', label='-2σ')
-    
-    if 'VWAP' in data.columns:
-        ax1.plot(data.index, data['VWAP'], color='orange', alpha=0.7, linestyle='--', label='VWAP')
-    if 'Cloud_Top' in data.columns:
-        ax1.plot(data.index, data['Cloud_Top'], color='blue', alpha=0.2, label='Cloud Top')
-        ax1.fill_between(data.index, data['Cloud_Top'], data['Close'].min(), color='blue', alpha=0.05)
+    try:
+        data = df.tail(80).copy()
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
+        
+        sma20 = data['Close'].rolling(20).mean()
+        std20 = data['Close'].rolling(20).std()
+        ax1.plot(data.index, data['Close'], color='black', label='Close')
+        ax1.plot(data.index, sma20 + 2*std20, color='green', alpha=0.5, linestyle='--', label='+2σ')
+        ax1.plot(data.index, sma20 - 2*std20, color='green', alpha=0.5, linestyle='--', label='-2σ')
+        
+        if 'VWAP' in data.columns:
+            ax1.plot(data.index, data['VWAP'], color='orange', alpha=0.7, linestyle='--', label='VWAP')
+        if 'Cloud_Top' in data.columns:
+            ax1.plot(data.index, data['Cloud_Top'], color='blue', alpha=0.2, label='Cloud Top')
+            ax1.fill_between(data.index, data['Cloud_Top'], data['Close'].min(), color='blue', alpha=0.05)
 
-    ax1.set_title(f"{name} V11 Advanced Chart")
-    ax1.legend(); ax1.grid(True, alpha=0.3)
-    ax2.bar(data.index, data['Volume'], color='gray', alpha=0.5)
-    
-    buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=80); plt.close(fig); buf.seek(0)
-    return buf.getvalue()
+        ax1.set_title(f"{name} V11 Advanced Chart")
+        ax1.legend(); ax1.grid(True, alpha=0.3)
+        ax2.bar(data.index, data['Volume'], color='gray', alpha=0.5)
+        
+        buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=80); plt.close(fig); buf.seek(0)
+        return buf.getvalue()
+    except Exception: return None
 
 def ai_decision_maker_v11(model, chart_bytes, metrics, cbr_text, ticker):
     rsi_context = f"{metrics['rsi']:.1f}"
@@ -366,7 +364,7 @@ def ai_decision_maker_v11(model, chart_bytes, metrics, cbr_text, ticker):
 - Choppiness Index: {chop_context}
 
 [Advanced Indicators]
-- VWAP Deviation: {metrics['vwap_dev']:.2f}% (Positive=Overbought, Negative=Oversold)
+- VWAP Deviation: {metrics['vwap_dev']:.2f}%
 - RSI(14): {rsi_context}
 - RSI Divergence: **{metrics['rsi_divergence']}**
 - Cloud Position: {metrics['price_vs_cloud']}
@@ -398,7 +396,7 @@ def ai_decision_maker_v11(model, chart_bytes, metrics, cbr_text, ticker):
         return {"action": "HOLD", "reason": "AI Error", "confidence": 0}
 
 # ==========================================
-# 3. メイン実行
+# 4. メイン実行
 # ==========================================
 def main():
     print(f"=== 🚀 AI Market Monitor V11 (Live Scan) ===")
@@ -457,7 +455,6 @@ def main():
             sl_mult = float(decision.get('sl_multiplier', 2.0))
             sl_price = metrics['price'] - (atr * sl_mult)
             
-            # ファンダメンタルズ取得（参考用）
             fund = get_fundamentals(ticker)
             per_str = f"{fund['PER']:.1f}" if fund['PER'] else "-"
             
@@ -474,7 +471,7 @@ def main():
         else:
             print(f" -> Pass ({action}, {conf}%)")
             
-        time.sleep(1) # API制限考慮
+        time.sleep(1) 
 
     # 結果表示と通知
     print("\n" + "="*60)
@@ -484,11 +481,11 @@ def main():
     discord_message = ""
     
     if candidates:
-        # コンソール表示用
         df_res = pd.DataFrame(candidates)
+        # コンソール表示
         print(df_res[['Ticker', 'Price', 'Conf', 'SL', 'Regime', 'Reason']].to_string(index=False))
         
-        # Discord通知用メッセージ作成
+        # Discord通知用
         discord_message = f"**【AI推奨銘柄 V11】** ({datetime.datetime.now().strftime('%Y-%m-%d')})\n\n"
         for c in candidates:
             discord_message += f"**{c['Ticker']}** (現在値: {c['Price']:.0f}円)\n"
