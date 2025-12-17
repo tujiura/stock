@@ -75,7 +75,7 @@ genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
 # ==========================================
 # 1. データ取得
 # ==========================================
-def download_data_safe(ticker, period="5y", interval="1d", retries=3): 
+def download_data_safe(ticker, period="7y", interval="1d", retries=3): 
     wait = 1
     for attempt in range(retries):
         try:
