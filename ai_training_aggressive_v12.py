@@ -47,17 +47,14 @@ TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
 TRADE_BUDGET = 1000000 
 
-# ★ V12 ロジックパラメータ (分析結果に基づく最適化)
-# トレンドの「初動」を捉えるための狭いADXレンジ
+# ★ V12 ロジックパラメータ
 ADX_MIN = 20.0
-ADX_MAX = 40.0 # 40以上は過熱感ありとして避ける
-ROC_MAX = 15.0 # 短期急騰は避ける
-
-# リスク管理
+ADX_MAX = 40.0
+ROC_MAX = 15.0
 ATR_MULTIPLIER = 2.5
 VWAP_WINDOW = 20
 
-# 銘柄リスト (V9拡張版を継承)
+# 銘柄リスト
 LIST_CORE = [
     "8035.T", "6857.T", "6146.T", "6920.T", "6758.T", "6702.T", "6501.T", "6503.T", "7751.T", "4063.T", "6981.T", "6723.T",
     "7203.T", "7267.T", "6902.T", "6301.T", "6367.T", "7011.T", "7013.T", 
@@ -84,12 +81,11 @@ def download_data_safe(ticker, period="5y", interval="1d", retries=3):
     for attempt in range(retries):
         try:
             logging.getLogger('yfinance').setLevel(logging.CRITICAL)
-            print(f"   Downloading {ticker}...", end="")
+            # print(f"   Downloading {ticker}...", end="")
             
             df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
             
             if df.empty:
-                print(" -> Empty")
                 time.sleep(wait); wait *= 2
                 continue
                 
@@ -98,15 +94,44 @@ def download_data_safe(ticker, period="5y", interval="1d", retries=3):
                 except: pass
             
             if len(df) < 200:
-                print(f" -> Too short ({len(df)})")
+                # print(f" -> Too short ({len(df)})")
                 return None
             
-            print(f" -> OK ({len(df)})")
+            # print(f" -> OK ({len(df)})")
             return df
-        except Exception as e:
-            print(f" -> Error: {e}")
+        except Exception:
             time.sleep(wait); wait *= 2
     return None
+
+def calculate_market_filter(market_df):
+    """
+    市場環境フィルター (Market Regime Filter)
+    日経平均のトレンドを判定する
+    """
+    try:
+        df = market_df.copy()
+        close = df['Close']
+        
+        # 移動平均線
+        df['SMA25'] = close.rolling(25).mean()
+        df['SMA200'] = close.rolling(200).mean()
+        
+        # 判定ロジック
+        # 1. 完全な強気: 価格 > 200MA
+        # 2. 回復期: 価格 < 200MA だが 価格 > 25MA (短期上昇)
+        # 3. 完全な弱気: 価格 < 200MA かつ 価格 < 25MA
+        
+        conditions = [
+            (close > df['SMA200']),
+            (close <= df['SMA200']) & (close > df['SMA25']),
+            (close <= df['SMA200']) & (close <= df['SMA25'])
+        ]
+        choices = ['Bullish', 'Recovery', 'Bearish']
+        
+        df['Market_Regime'] = np.select(conditions, choices, default='Unknown')
+        return df['Market_Regime']
+    except:
+        return None
 
 def calculate_technical_indicators_v12(df):
     """V12仕様: ROC, MFIを追加"""
@@ -178,23 +203,35 @@ def calculate_technical_indicators_v12(df):
         df['Cloud_Top'] = pd.concat([senkou_a, senkou_b], axis=1).max(axis=1)
 
         return df.dropna()
-    except Exception as e:
-        # print(f"Calc Error: {e}")
+    except Exception:
         return None
 
-def calculate_metrics_v12(df, idx):
+def calculate_metrics_v12(df, idx, market_regime_series=None):
     try:
         if idx < 60 or idx >= len(df): return None
         curr = df.iloc[idx]
         price = float(curr['Close'])
         
+        # 市場環境フィルタ (V12 Improved)
+        market_regime = "Unknown"
+        if market_regime_series is not None:
+            target_date = df.index[idx]
+            # 日付が一致する市場データを検索（なければ直近）
+            try:
+                if target_date in market_regime_series.index:
+                    market_regime = market_regime_series.loc[target_date]
+                else:
+                    # 直前の営業日を探す
+                    prev_loc = market_regime_series.index.get_indexer([target_date], method='pad')[0]
+                    if prev_loc != -1:
+                        market_regime = market_regime_series.iloc[prev_loc]
+            except: pass
+
         # V12 Metrics
         adx = float(curr.get('ADX', 20.0))
         roc = float(curr.get('ROC', 0.0))
         mfi = float(curr.get('MFI', 50.0))
         
-        # 局面判定 (V12 Optimized)
-        # ADX 20-40 を「初動～成熟期」として狙う
         if ADX_MIN <= adx <= ADX_MAX:
             regime = "Trend Start/Growth"
         elif adx > ADX_MAX:
@@ -217,20 +254,26 @@ def calculate_metrics_v12(df, idx):
             'dist_to_res': dist_to_res,
             'ma_deviation': ma_deviation,
             'adx': adx,
-            'roc': roc, # V12
-            'mfi': mfi, # V12
+            'roc': roc, 
+            'mfi': mfi,
             'atr_value': float(curr.get('ATR', price*0.01)),
             'macd_hist': macd_hist,
             'macd_trend': "Expanding" if abs(macd_hist) > abs(prev_hist) else "Shrinking",
             'price_vs_cloud': price_vs_cloud,
             'rsi': float(curr.get('RSI', 50.0)),
             'regime': regime,
-            'vwap_dev': float(curr.get('VWAP_Dev', 0.0))
+            'vwap_dev': float(curr.get('VWAP_Dev', 0.0)),
+            'market_regime': market_regime # V12追加
         }
     except Exception: return None
 
 def check_iron_rules_v12(metrics):
-    # V12の改善点: 高値掴み防止
+    # 1. 市場環境フィルター (V12 Modified)
+    # Bearish (200MA以下 & 25MA以下) の時は「冬の時代」なので取引停止
+    if metrics['market_regime'] == 'Bearish':
+        return "Market Bearish (Wait for Recovery)"
+        
+    # 2. 個別銘柄フィルター
     if metrics['roc'] > ROC_MAX: return f"ROC Too High ({metrics['roc']:.1f}%)"
     if metrics['adx'] > 50: return "ADX Overheat (>50)"
     if metrics['price_vs_cloud'] == "Below": return "Below Cloud"
@@ -251,8 +294,8 @@ class CaseBasedMemory:
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "target_price", 
             "Actual_High", "Price", 
-            "adx", "roc", "mfi", "vwap_dev", "rsi", # V12
-            "regime", "profit_rate"
+            "adx", "roc", "mfi", "vwap_dev", "rsi", 
+            "regime", "market_regime", "profit_rate" # market_regime追加
         ]
         self.load_and_train()
 
@@ -345,6 +388,7 @@ def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
 - **ROC(10)**: {metrics['roc']:.1f}% (高すぎると危険)
 - **MFI**: {metrics['mfi']:.1f} (資金流入)
 - **Regime**: **{metrics['regime']}**
+- **Market**: **{metrics['market_regime']}** (市場全体の地合い)
 
 [Confirmation]
 - VWAP Deviation: {metrics['vwap_dev']:.2f}%
@@ -389,8 +433,15 @@ def main():
     except Exception as e: print(f"Model Init Error: {e}"); return
 
     print("データ取得中...", end="")
-    processed_data = {}
     
+    # 1. 市場データ取得 (日経平均)
+    nikkei = download_data_safe("^N225")
+    market_regime_series = None
+    if nikkei is not None:
+        market_regime_series = calculate_market_filter(nikkei)
+        print("Market data OK.")
+    
+    processed_data = {}
     for i, t in enumerate(TRAINING_LIST):
         df = download_data_safe(t, period="5y") 
         if df is None: continue
@@ -418,10 +469,11 @@ def main():
         if max_idx < 100: continue
         
         target_idx = random.randint(100, max_idx) 
-        metrics = calculate_metrics_v12(df, target_idx)
+        metrics = calculate_metrics_v12(df, target_idx, market_regime_series)
         
         if metrics is None: continue
 
+        # V12 Iron Rule (Market Filter included)
         iron_rule = check_iron_rules_v12(metrics)
         if iron_rule: continue
 
@@ -439,7 +491,6 @@ def main():
         entry_price = float(metrics['price'])
         atr = metrics['atr_value']
         
-        # V12: 固定倍率ではなくAI推奨倍率を採用
         sl_mult = float(decision.get('sl_multiplier', ATR_MULTIPLIER))
         current_stop_loss = entry_price - (atr * sl_mult)
         
@@ -457,7 +508,7 @@ def main():
         is_loss = False
         is_win = False
         
-        ai_target = decision.get('target_price', 0) # V12はTPもAIに委ねる
+        ai_target = decision.get('target_price', 0) 
 
         for _, row in future_prices.iterrows():
             high = row['High']; low = row['Low']; close = row['Close']
@@ -467,14 +518,12 @@ def main():
                 final_exit_price = current_stop_loss
                 break
             
-            # トレーリングストップ
             if high > max_price:
                 max_price = high
                 new_stop = max_price - (atr * sl_mult)
                 if new_stop > current_stop_loss:
                     current_stop_loss = new_stop
             
-            # AIターゲットがあれば利確
             if ai_target > 0 and high >= ai_target:
                 is_win = True
                 final_exit_price = ai_target
@@ -502,11 +551,12 @@ def main():
             'Actual_High': future_prices['High'].max(), 
             'Price': metrics['price'], 
             'adx': metrics['adx'], 
-            'roc': metrics['roc'], # V12
-            'mfi': metrics['mfi'], # V12
+            'roc': metrics['roc'],
+            'mfi': metrics['mfi'],
             'vwap_dev': metrics['vwap_dev'], 
             'rsi': metrics['rsi'],
             'regime': metrics['regime'],
+            'market_regime': metrics['market_regime'],
             'profit_rate': profit_rate 
         }
         memory_system.save_experience(save_data)

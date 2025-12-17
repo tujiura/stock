@@ -42,10 +42,10 @@ MODEL_NAME = 'models/gemini-2.0-flash'
 START_DATE = "2023-01-01"
 END_DATE   = "2025-11-30"
 
-INITIAL_CAPITAL = 100000
+INITIAL_CAPITAL = 100000 
 RISK_PER_TRADE = 0.40      
-MAX_POSITIONS = 5        
-MAX_INVEST_RATIO = 1   
+MAX_POSITIONS = 5         
+MAX_INVEST_RATIO = 1    
 
 # V12 Parameters
 ADX_MIN = 20.0
@@ -54,7 +54,7 @@ ROC_MAX = 15.0
 ATR_MULTIPLIER = 2.5
 VWAP_WINDOW = 20
 
-# 銘柄リスト (V9拡張版を継承)
+# 銘柄リスト
 LIST_CORE = [
     "8035.T", "6857.T", "6146.T", "6920.T", "6758.T", "6702.T", "6501.T", "6503.T", "7751.T", "4063.T", "6981.T", "6723.T",
     "7203.T", "7267.T", "6902.T", "6301.T", "6367.T", "7011.T", "7013.T", 
@@ -73,7 +73,9 @@ TRAINING_LIST = sorted(list(set(LIST_CORE + LIST_GROWTH)))
 plt.rcParams['font.family'] = 'sans-serif'
 genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
 
-# (データ取得・指標計算関数はトレーニング用と同じため省略せず記述)
+# ==========================================
+# 1. データ取得
+# ==========================================
 def download_data_safe(ticker, period="5y", interval="1d", retries=3): 
     wait = 1
     for attempt in range(retries):
@@ -91,6 +93,23 @@ def download_data_safe(ticker, period="5y", interval="1d", retries=3):
         except Exception:
             time.sleep(wait); wait *= 2
     return None
+
+def calculate_market_filter(market_df):
+    try:
+        df = market_df.copy()
+        close = df['Close']
+        df['SMA25'] = close.rolling(25).mean()
+        df['SMA200'] = close.rolling(200).mean()
+        
+        conditions = [
+            (close > df['SMA200']),
+            (close <= df['SMA200']) & (close > df['SMA25']),
+            (close <= df['SMA200']) & (close <= df['SMA25'])
+        ]
+        choices = ['Bullish', 'Recovery', 'Bearish']
+        df['Market_Regime'] = np.select(conditions, choices, default='Unknown')
+        return df['Market_Regime']
+    except: return None
 
 def calculate_technical_indicators_v12(df):
     try:
@@ -144,24 +163,41 @@ def calculate_technical_indicators_v12(df):
         return df.dropna()
     except Exception: return None
 
-def calculate_metrics_v12(df, idx):
+def calculate_metrics_v12(df, idx, market_regime_series=None):
     try:
         if idx < 60 or idx >= len(df): return None
         curr = df.iloc[idx]
         price = float(curr['Close'])
+        
+        market_regime = "Unknown"
+        if market_regime_series is not None:
+            target_date = df.index[idx]
+            try:
+                if target_date in market_regime_series.index:
+                    market_regime = market_regime_series.loc[target_date]
+                else:
+                    prev_loc = market_regime_series.index.get_indexer([target_date], method='pad')[0]
+                    if prev_loc != -1: market_regime = market_regime_series.iloc[prev_loc]
+            except: pass
+
         adx = float(curr.get('ADX', 20.0))
         roc = float(curr.get('ROC', 0.0))
         mfi = float(curr.get('MFI', 50.0))
+        
         if ADX_MIN <= adx <= ADX_MAX: regime = "Trend Start/Growth"
         elif adx > ADX_MAX: regime = "Overheated Trend"
         else: regime = "Range/Weak"
+
         recent_high = df['High'].iloc[idx-60:idx].max()
         dist_to_res = ((price - recent_high) / recent_high) * 100 if recent_high > 0 else 0
         ma_deviation = ((price / float(curr['SMA25'])) - 1) * 100
+        
         macd_hist = float(curr.get('MACD_Hist', 0.0))
         prev_hist = float(df['MACD_Hist'].iloc[idx-1]) if idx > 0 else 0.0
+        
         cloud_top = float(curr.get('Cloud_Top', price))
         price_vs_cloud = "Above" if price > cloud_top else "Below"
+
         return {
             'date': df.index[idx].strftime('%Y-%m-%d'),
             'price': price,
@@ -176,11 +212,13 @@ def calculate_metrics_v12(df, idx):
             'price_vs_cloud': price_vs_cloud,
             'rsi': float(curr.get('RSI', 50.0)),
             'regime': regime,
-            'vwap_dev': float(curr.get('VWAP_Dev', 0.0))
+            'vwap_dev': float(curr.get('VWAP_Dev', 0.0)),
+            'market_regime': market_regime
         }
     except Exception: return None
 
 def check_iron_rules_v12(metrics):
+    if metrics['market_regime'] == 'Bearish': return "Market Bearish"
     if metrics['roc'] > ROC_MAX: return f"ROC Too High ({metrics['roc']:.1f}%)"
     if metrics['adx'] > 50: return "ADX Overheat (>50)"
     if metrics['price_vs_cloud'] == "Below": return "Below Cloud"
@@ -250,21 +288,15 @@ def create_chart_image(df, name):
 def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
     prompt = f"""
 ### Role
-あなたは「トレンド初動ハンター」です。成熟したトレンド（高値掴み）を避け、これから伸びる「初動」のみを狙います。
+あなたは「トレンド初動ハンター」です。
 
 ### Input Data
 銘柄: {ticker} (現在値: {metrics['price']:.0f}円)
 
-[Early Trend Indicators]
-- **ADX**: {metrics['adx']:.1f} (理想: 20-35)
-- **ROC(10)**: {metrics['roc']:.1f}% (高すぎると危険)
-- **MFI**: {metrics['mfi']:.1f} (資金流入)
-- **Regime**: **{metrics['regime']}**
-
-[Confirmation]
-- VWAP Deviation: {metrics['vwap_dev']:.2f}%
-- RSI(14): {metrics['rsi']:.1f}
-- Cloud Position: {metrics['price_vs_cloud']}
+[Market Data]
+- ADX: {metrics['adx']:.1f}
+- ROC(10): {metrics['roc']:.1f}%
+- Market Regime: {metrics['market_regime']}
 
 {cbr_text}
 
@@ -275,7 +307,7 @@ def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
   "confidence": 0-100,
   "sl_multiplier": 2.5,
   "tp_multiplier": 5.0,
-  "reason": "理由(50文字以内)"
+  "reason": "理由"
 }}
 """
     safety = {HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
@@ -284,8 +316,7 @@ def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
         text = response.text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match: return json.loads(match.group(0))
-    except Exception:
-        return {"action": "HOLD", "reason": "AI Error", "confidence": 0}
+    except: return {"action": "HOLD", "reason": "Error", "confidence": 0}
 
 def run_commander_batch(model, candidates_data, current_cash, current_portfolio_text):
     candidates_text = ""
@@ -308,13 +339,13 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
 """
 
     prompt = f"""
-あなたは運用指令官です。分析官の報告に基づき、売買判断を下してください。
+あなたは運用指令官です。
 
 ### 現在の状況
 - 手元資金: {current_cash:,.0f}円
 - 保有銘柄: {current_portfolio_text}
 
-### 候補銘柄レポート
+### 候補銘柄
 {candidates_text}
 
 ### 任務
@@ -342,7 +373,7 @@ JSON形式で注文を出力してください。
     return {"orders": []}
 
 def main():
-    print(f"=== 🧪 酸性試験 (V12: Early Trend Hunter) ({START_DATE} ~ {END_DATE}) ===")
+    print(f"=== 🧪 酸性試験 (V12: Early Trend Hunter + Market Filter) ({START_DATE} ~ {END_DATE}) ===")
     
     memory = MemorySystem(LOG_FILE)
     try:
@@ -351,7 +382,15 @@ def main():
         print(f"Model Init Error: {e}")
         return
 
-    print("データ取得中...")
+    print("データ取得中...", end="")
+    
+    # 1. 市場データ取得
+    nikkei = download_data_safe("^N225")
+    market_regime_series = None
+    if nikkei is not None:
+        market_regime_series = calculate_market_filter(nikkei)
+        print("Market data OK.")
+
     tickers_data = {}
     for i, t in enumerate(TRAINING_LIST):
         df = download_data_safe(t)
@@ -391,30 +430,28 @@ def main():
             day_data = df.loc[current_date]
             day_low = float(day_data['Low'])
             day_high = float(day_data['High'])
-            day_open = float(day_data['Open'])
             
-            # 1. 損切り判定 (SL)
+            # 損切り
             current_sl = float(pos['sl_price'])
             if day_low <= current_sl:
                 exec_price = current_sl
-                if day_open < current_sl: exec_price = day_open
                 proceeds = exec_price * pos['shares']
                 cash += proceeds
                 profit = proceeds - (pos['buy_price'] * pos['shares'])
                 profit_rate = (exec_price - pos['buy_price']) / pos['buy_price'] * 100
                 print(f"\n[{date_str}] 💀 損切 {ticker}: {profit:+,.0f}円 ({profit_rate:+.2f}%)")
-                trade_history.append({'Result': 'WIN' if profit>0 else 'LOSS', 'PL': profit})
+                trade_history.append({'Result': 'LOSS', 'PL': profit})
                 closed_tickers.append(ticker)
                 continue
 
-            # 2. トレーリングストップ
+            # トレーリング
             if day_high > pos['max_price']:
                 pos['max_price'] = day_high
                 new_sl = pos['max_price'] - (pos['atr'] * ATR_MULTIPLIER)
                 if new_sl > current_sl:
                     pos['sl_price'] = new_sl
             
-            # 3. 利確 (TP)
+            # 利確
             if pos.get('tp_price', 0) > 0 and day_high >= pos['tp_price']:
                 exec_price = pos['tp_price']
                 proceeds = exec_price * pos['shares']
@@ -429,7 +466,7 @@ def main():
         for t in closed_tickers: del portfolio[t]
 
         # --- B. 新規エントリー ---
-        if len(portfolio) < MAX_POSITIONS and cash > 0:
+        if len(portfolio) < MAX_POSITIONS and cash > 10000:
             candidates_data = []
             
             for ticker in tickers_data.keys():
@@ -439,7 +476,7 @@ def main():
                 idx = df.index.get_loc(current_date)
                 if idx < 60: continue
 
-                metrics = calculate_metrics_v12(df, idx)
+                metrics = calculate_metrics_v12(df, idx, market_regime_series)
                 if metrics is None: continue
 
                 iron_rule_check = check_iron_rules_v12(metrics)
@@ -466,7 +503,9 @@ def main():
                 for order in decision_data.get('orders', []):
                     tic = order.get('ticker')
                     try:
-                        shares = int(order.get('shares', 0))
+                        raw_shares = order.get('shares', 0)
+                        if isinstance(raw_shares, str): raw_shares = float(raw_shares.replace(',', ''))
+                        shares = int(raw_shares)
                     except: shares = 0
 
                     if shares > 0:
