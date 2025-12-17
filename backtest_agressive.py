@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import json
 import datetime
@@ -10,82 +11,20 @@ import google.generativeai as genai
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-import io
 import re
 import logging
-
-# ==========================================
-# ★設定エリア: V9 (Expanded List)
-# ==========================================
-START_DATE = "2023-01-01"
-END_DATE   = "2025-11-30"
-
-INITIAL_CAPITAL = 100000
-RISK_PER_TRADE = 0.40      
-MAX_POSITIONS = 12         # 銘柄増えたので最大保有数も少し増やす
-MAX_INVEST_RATIO = 0.4    # 分散投資のため1銘柄の上限を40%に
-
-# ★ V9 ロジックパラメータ
-MARKET_ADX_THRESHOLD = 25.0    
-
-# [A] ゲリラモード 
-GUERRILLA_TARGET = 0.06        
-GUERRILLA_STOP = 1.5           
-
-# [B] ホームランモード
-HOMERUN_STOP_INIT = 1.8        
-HOMERUN_TRAIL_TRIGGER = 0.10   
-HOMERUN_TRAIL_WIDTH = 2.0      
-
-# 保存ファイル名
-LOG_FILE = "ai_trade_memory_aggressive_v9_exp.csv" 
-HISTORY_CSV = "backtest_history_v9_exp.csv" 
-
-TIMEFRAME = "1d"
-CBR_NEIGHBORS_COUNT = 15
-MODEL_NAME = 'models/gemini-2.0-flash'
-
-# === 銘柄リスト (拡張版) ===
-
-# 1. 主力・大型株リスト (トレンド相場で輝く: CORE)
-LIST_CORE = [
-    # 半導体・ハイテク
-    "8035.T", "6857.T", "6146.T", "6920.T", "6758.T", "6702.T", "6501.T", "6503.T", "7751.T", "4063.T", "6981.T", "6723.T",
-    # 自動車・機械
-    "7203.T", "7267.T", "6902.T", "6301.T", "6367.T", "7011.T", "7013.T", 
-    # 金融・商社
-    "8306.T", "8316.T", "8411.T", "8766.T", "8058.T", "8001.T", "8031.T", "8002.T", "9984.T",
-    # 内需・通信・その他
-    "9432.T", "9983.T", "4568.T", "4543.T", "4661.T", "7974.T", "6506.T"
-]
-
-# 2. 中小型・材料株・高ボラリスト (レンジ相場で輝く: GROWTH)
-LIST_GROWTH = [
-    # AI・SaaS・ネット
-    "5253.T", "5032.T", "9166.T", "4385.T", "4478.T", "4483.T", "3993.T", "4180.T", "3687.T", "6027.T",
-    # 宇宙・防衛・深海
-    "5595.T", "9348.T", "7012.T", "6203.T", "186A", # 186Aはアストロスケール(対応していれば)
-    # 半導体中小型
-    "6254.T", "6315.T", "6526.T", "6228.T", "6963.T", "3436.T", "7735.T", "6890.T",
-    # エンタメ・消費
-    "2768.T", "7342.T", "2413.T", "2222.T", "7532.T", "3092.T",
-    # 海運・資源・市況
-    "9101.T", "9104.T", "9107.T", "1605.T", "5713.T", "5401.T", "5411.T"
-]
-
-# 重複除去 & ソート
-LIST_CORE = sorted(list(set(LIST_CORE)))
-LIST_GROWTH = sorted(list(set(LIST_GROWTH)))
-
-plt.rcParams['font.family'] = 'sans-serif'
-
-# ---------------------------------------------------------
-# 環境設定
-# ---------------------------------------------------------
-def allowed_gai_family():
-    import socket
-    return socket.AF_INET
+import socket
 import requests.packages.urllib3.util.connection as urllib3_cn
+from scipy.signal import argrelextrema
+import warnings
+
+# ---------------------------------------------------------
+# ★環境設定
+# ---------------------------------------------------------
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+def allowed_gai_family():
+    return socket.AF_INET
 urllib3_cn.allowed_gai_family = allowed_gai_family
 
 try:
@@ -97,149 +36,217 @@ except ImportError:
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
-else:
-    genai.configure(api_key=GOOGLE_API_KEY)
+
+# 設定
+LOG_FILE = "ai_trade_memory_aggressive_v11.csv" 
+HISTORY_CSV = "backtest_history_v11.csv"
+MODEL_NAME = 'models/gemini-2.0-flash'
+
+START_DATE = "2023-01-01"
+END_DATE   = "2025-11-30"
+
+INITIAL_CAPITAL = 100000
+RISK_PER_TRADE = 0.40      
+MAX_POSITIONS = 12         
+MAX_INVEST_RATIO = 1.0 / MAX_POSITIONS   
+
+# V11 Parameters
+ADX_THRESHOLD = 25.0
+CHOP_THRESHOLD_TREND = 38.2
+CHOP_THRESHOLD_RANGE = 61.8
+ATR_MULTIPLIER = 2.5
+VWAP_WINDOW = 20
+
+# リスク管理パラメータ
+DEFAULT_ATR_SL_MULT = 2.0  
+DEFAULT_ATR_TP_MULT = 4.0  
+
+CBR_NEIGHBORS_COUNT = 15
+TIMEFRAME = "1d"
+
+# 銘柄リスト
+LIST_CORE = [
+    "8035.T", "6857.T", "6146.T", "6920.T", "6758.T", "6702.T", "6501.T", "6503.T", "7751.T", "4063.T", "6981.T", "6723.T",
+    "7203.T", "7267.T", "6902.T", "6301.T", "6367.T", "7011.T", "7013.T", 
+    "8306.T", "8316.T", "8411.T", "8766.T", "8058.T", "8001.T", "8031.T", "8002.T", "9984.T",
+    "9432.T", "9983.T", "4568.T", "4543.T", "4661.T", "7974.T", "6506.T"
+]
+LIST_GROWTH = [
+    "5253.T", "5032.T", "9166.T", "4385.T", "4478.T", "4483.T", "3993.T", "4180.T", "3687.T", "6027.T",
+    "5595.T", "9348.T", "7012.T", "6203.T", 
+    "6254.T", "6315.T", "6526.T", "6228.T", "6963.T", "3436.T", "7735.T", "6890.T",
+    "2768.T", "7342.T", "2413.T", "2222.T", "7532.T", "3092.T",
+    "9101.T", "9104.T", "9107.T", "1605.T", "5713.T", "5401.T", "5411.T"
+]
+TRAINING_LIST = sorted(list(set(LIST_CORE + LIST_GROWTH)))
+
+plt.rcParams['font.family'] = 'sans-serif'
+genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
 
 # ==========================================
-# 1. データ取得 & テクニカル計算
+# 1. データ取得
 # ==========================================
 def download_data_safe(ticker, period="5y", interval="1d", retries=3): 
-    wait = 2
+    wait = 1
     for attempt in range(retries):
         try:
             logging.getLogger('yfinance').setLevel(logging.CRITICAL)
             df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-            if df.empty: return None
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
-            if len(df) < 100: return None
+            if df.empty:
+                time.sleep(wait); wait *= 2
+                continue
+            if isinstance(df.columns, pd.MultiIndex):
+                try: df.columns = df.columns.get_level_values(0)
+                except: pass
+            if len(df) < 200: return None
             return df
-        except:
+        except Exception:
             time.sleep(wait); wait *= 2
     return None
 
-def calculate_technical_indicators(df):
-    df = df.copy()
-    close = df['Close']; high = df['High']; low = df['Low']
-    
-    df['SMA25'] = close.rolling(25).mean()
-    
-    tr1 = high - low
-    tr2 = abs(high - close.shift(1))
-    tr3 = abs(low - close.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    plus_dm = high.diff()
-    minus_dm = low.diff()
-    plus_dm = plus_dm.where((plus_dm > 0) & (plus_dm > minus_dm), 0)
-    minus_dm = minus_dm.where((minus_dm > 0) & (minus_dm > plus_dm), 0)
+def calculate_technical_indicators_v11(df):
+    try:
+        df = df.copy()
+        required_cols = ['Close', 'High', 'Low', 'Volume']
+        for col in required_cols:
+            if col not in df.columns: return None
 
-    tr_smooth = tr.rolling(14).mean()
-    df['PlusDI'] = 100 * (plus_dm.rolling(14).mean() / tr_smooth)
-    df['MinusDI'] = 100 * (minus_dm.rolling(14).mean() / tr_smooth)
-    dx = (abs(df['PlusDI'] - df['MinusDI']) / (df['PlusDI'] + df['MinusDI'])) * 100
-    df['ADX'] = dx.rolling(14).mean()
-    df['ATR'] = tr.rolling(14).mean()
+        close = df['Close']; high = df['High']; low = df['Low']; vol = df['Volume']
+        df['SMA25'] = close.rolling(25).mean()
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        df['ATR'] = tr.rolling(14).mean()
+        
+        plus_dm = high.diff().clip(lower=0)
+        minus_dm = low.diff().clip(upper=0).abs()
+        plus_dm = np.where(plus_dm > minus_dm, plus_dm, 0)
+        minus_dm = np.where(minus_dm > plus_dm, minus_dm, 0)
+        
+        tr_smooth = tr.rolling(14).mean().replace(0, np.nan)
+        plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(14).mean() / tr_smooth)
+        minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(14).mean() / tr_smooth)
+        denom = (plus_di + minus_di).replace(0, np.nan)
+        df['ADX'] = (abs(plus_di - minus_di) / denom) * 100
+        df['ADX'] = df['ADX'].rolling(14).mean()
 
-    sma20 = close.rolling(20).mean()
-    std20 = close.rolling(20).std()
-    df['BB_Width'] = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100
-    df['Vol_MA20'] = df['Volume'].rolling(20).mean()
-    
-    delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(9).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(9).mean()
-    df['RSI9'] = 100 - (100 / (1 + gain/loss))
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss.replace(0, np.nan)
+        df['RSI'] = 100 - (100 / (1 + rs))
+        df['RSI'] = df['RSI'].fillna(50)
 
-    exp12 = close.ewm(span=12, adjust=False).mean()
-    exp26 = close.ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp12 - exp26
-    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACD_Hist'] = df['MACD'] - df['Signal']
+        exp12 = close.ewm(span=12, adjust=False).mean()
+        exp26 = close.ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp12 - exp26
+        df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = df['MACD'] - df['Signal']
 
-    high9 = high.rolling(9).max(); low9 = low.rolling(9).min()
-    tenkan = (high9 + low9) / 2
-    high26 = high.rolling(26).max(); low26 = low.rolling(26).min()
-    kijun = (high26 + low26) / 2
-    
-    senkou_a = ((tenkan + kijun) / 2).shift(26)
-    high52 = high.rolling(52).max(); low52 = low.rolling(52).min()
-    senkou_b = ((high52 + low52) / 2).shift(26)
-    
-    df['Cloud_Top'] = pd.concat([senkou_a, senkou_b], axis=1).max(axis=1)
+        sma20 = close.rolling(20).mean()
+        std20 = close.rolling(20).std()
+        sma20_safe = sma20.replace(0, np.nan)
+        df['BB_Width'] = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20_safe * 100
+        df['Vol_MA20'] = df['Volume'].rolling(20).mean()
 
-    return df.dropna()
+        tp = (high + low + close) / 3
+        df['VP'] = tp * vol
+        cumulative_vp = df['VP'].rolling(window=VWAP_WINDOW).sum()
+        cumulative_vol = vol.rolling(window=VWAP_WINDOW).sum().replace(0, np.nan)
+        df['VWAP'] = cumulative_vp / cumulative_vol
+        df['VWAP_Dev'] = np.where(df['VWAP'].notna(), ((close - df['VWAP']) / df['VWAP']) * 100, 0)
+        
+        high_n = high.rolling(14).max()
+        low_n = low.rolling(14).min()
+        atr_sum = tr.rolling(14).sum()
+        range_n = (high_n - low_n).replace(0, np.nan)
+        log_range = np.log10(range_n.replace(0, np.nan))
+        log_atr = np.log10(atr_sum.replace(0, np.nan))
+        df['CHOP'] = (100 * (log_atr - log_range) / np.log10(14)).fillna(50)
+        
+        tenkan = (high.rolling(9).max() + low.rolling(9).min()) / 2
+        kijun = (high.rolling(26).max() + low.rolling(26).min()) / 2
+        senkou_a = ((tenkan + kijun) / 2).shift(26)
+        senkou_b = ((high.rolling(52).max() + low.rolling(52).min()) / 2).shift(26)
+        df['Cloud_Top'] = pd.concat([senkou_a, senkou_b], axis=1).max(axis=1)
 
-def calculate_metrics_at_date(df, idx):
-    curr = df.iloc[idx]
-    price = float(curr['Close'])
-    
-    recent_high = df['High'].iloc[idx-60:idx].max()
-    dist_to_res = ((price - recent_high) / recent_high) * 100 if recent_high > 0 else 0
-    
-    adx = float(curr['ADX'])
-    prev_adx = float(df['ADX'].iloc[idx-1])
-    sma25 = float(curr['SMA25'])
-    ma_deviation = ((price / sma25) - 1) * 100
-    
-    bb_width = float(curr['BB_Width'])
-    prev_width = float(df['BB_Width'].iloc[idx-5]) if df['BB_Width'].iloc[idx-5] > 0 else 0.1
-    expansion_rate = bb_width / prev_width
-    
-    vol_ratio = float(curr['Volume']) / float(curr['Vol_MA20']) if float(curr['Vol_MA20']) > 0 else 0
-    
-    vol_history = []
-    for i in range(4, -1, -1):
-        if idx-i >= 0:
-            row = df.iloc[idx-i]
-            vr = float(row['Volume']) / float(row['Vol_MA20']) if float(row['Vol_MA20']) > 0 else 0
-            vol_history.append(f"{vr:.1f}")
-    vol_history_str = "->".join(vol_history)
+        df_clean = df.dropna()
+        if len(df_clean) < 100: return None
+        return df_clean
 
-    macd = float(curr['MACD'])
-    macd_hist = float(curr['MACD_Hist'])
-    prev_hist = float(df['MACD_Hist'].iloc[idx-1])
-    
-    cloud_top = float(curr['Cloud_Top']) if not pd.isna(curr['Cloud_Top']) else 0
-    price_vs_cloud = "Above" if price > cloud_top else "Below"
-    
-    open_p = float(curr['Open']); close_p = float(curr['Close']); high_p = float(curr['High']); low_p = float(curr['Low'])
-    body_top = max(open_p, close_p)
-    upper_shadow = high_p - body_top
-    total_range = high_p - low_p
-    shadow_ratio = upper_shadow / total_range if total_range > 0 else 0
-    candle_shape = "Good" if shadow_ratio < 0.3 else "Bad"
+    except Exception: return None
 
-    return {
-        'price': price,
-        'resistance_price': recent_high,
-        'dist_to_res': dist_to_res,
-        'ma_deviation': ma_deviation,
-        'adx': adx,
-        'prev_adx': prev_adx,
-        'plus_di': float(curr['PlusDI']),
-        'minus_di': float(curr['MinusDI']),
-        'vol_ratio': vol_ratio,
-        'vol_history': vol_history_str,
-        'expansion_rate': expansion_rate,
-        'atr_value': float(curr['ATR']),
-        'macd_val': macd,
-        'macd_hist': macd_hist,
-        'macd_trend': "Expanding" if abs(macd_hist) > abs(prev_hist) else "Shrinking",
-        'price_vs_cloud': price_vs_cloud,
-        'candle_shape': candle_shape,
-        'rsi_9': float(curr['RSI9'])
-    }
+def detect_divergence(series_price, series_osc, order=5):
+    try:
+        if len(series_price) < order * 2: return "None"
+        min_idx = argrelextrema(series_price.values, np.less_equal, order=order)[0]
+        if len(min_idx) >= 2:
+            curr, prev = min_idx[-1], min_idx[-2]
+            if series_price.iloc[curr] < series_price.iloc[prev] and series_osc.iloc[curr] > series_osc.iloc[prev]:
+                return "Bullish"
+        return "None"
+    except: pass
+    return "None"
 
-# ==========================================
-# 2. 鉄の掟 & 補助関数
-# ==========================================
-def check_iron_rules(metrics):
-    if metrics['adx'] < 20: return "ADX<20"
-    if metrics['vol_ratio'] < 0.8: return "Vol<0.8"
-    ma_dev = metrics['ma_deviation']
-    if 10.0 <= ma_dev <= 15.0: return f"DangerZone({ma_dev:.1f}%)"
-    if metrics['adx'] > 55: return "ADX Overheat"
-    if metrics['price_vs_cloud'] == "Below": return "Below Cloud"
+def calculate_metrics_v11(df, idx):
+    try:
+        if idx < 60 or idx >= len(df): return None
+        curr = df.iloc[idx]
+        price = float(curr['Close'])
+        
+        vwap_dev = float(curr.get('VWAP_Dev', 0.0))
+        chop = float(curr.get('CHOP', 50.0))
+        
+        div_window = 60
+        start_idx = max(0, idx - div_window)
+        slice_price = df['Close'].iloc[start_idx:idx+1]
+        slice_rsi = df['RSI'].iloc[start_idx:idx+1]
+        rsi_div = detect_divergence(slice_price, slice_rsi)
+        
+        adx = float(curr.get('ADX', 20.0))
+        if adx > ADX_THRESHOLD and chop < CHOP_THRESHOLD_TREND: regime = "Strong Trend"
+        elif adx < ADX_THRESHOLD and chop > CHOP_THRESHOLD_RANGE: regime = "Range/Chop"
+        elif chop > CHOP_THRESHOLD_RANGE: regime = "Volatile Transition"
+        else: regime = "Weak Trend"
+
+        recent_high = df['High'].iloc[idx-60:idx].max()
+        dist_to_res = ((price - recent_high) / recent_high) * 100 if recent_high > 0 else 0
+        ma_deviation = ((price / float(curr['SMA25'])) - 1) * 100
+        vol_ma = float(curr.get('Vol_MA20', 1.0))
+        vol_ratio = float(curr['Volume']) / vol_ma if vol_ma > 0 else 0
+        
+        macd_hist = float(curr.get('MACD_Hist', 0.0))
+        prev_hist = float(df['MACD_Hist'].iloc[idx-1]) if idx > 0 else 0.0
+        
+        cloud_top = float(curr.get('Cloud_Top', price))
+        price_vs_cloud = "Above" if price > cloud_top else "Below"
+
+        return {
+            'price': price,
+            'dist_to_res': dist_to_res,
+            'ma_deviation': ma_deviation,
+            'adx': adx,
+            'prev_adx': float(df['ADX'].iloc[idx-1]) if idx > 0 else 0.0,
+            'vol_ratio': vol_ratio,
+            'atr_value': float(curr.get('ATR', price*0.01)),
+            'macd_hist': macd_hist,
+            'macd_trend': "Expanding" if abs(macd_hist) > abs(prev_hist) else "Shrinking",
+            'price_vs_cloud': price_vs_cloud,
+            'rsi': float(curr.get('RSI', 50.0)),
+            'regime': regime,
+            'vwap_dev': vwap_dev,
+            'choppiness': chop,
+            'rsi_divergence': rsi_div,
+            'expansion_rate': 0.0 
+        }
+    except Exception: return None
+
+def check_iron_rules_v11(metrics):
+    if metrics['vol_ratio'] < 0.5: return "Volume Too Low"
+    if metrics['price_vs_cloud'] == "Below" and metrics['rsi_divergence'] != "Bullish":
+        return "Below Cloud (No Divergence)"
     return None
 
 def create_chart_image_at_date(df, idx, ticker):
@@ -252,41 +259,57 @@ def create_chart_image_at_date(df, idx, ticker):
         ax1.plot(data.index, sma20 + 2*std20, color='green', alpha=0.5, linestyle='--', label='+2σ')
         ax1.plot(data.index, sma20 - 2*std20, color='green', alpha=0.5, linestyle='--', label='-2σ')
         
+        if 'VWAP' in data.columns:
+            ax1.plot(data.index, data['VWAP'], color='orange', alpha=0.7, linestyle='--', label='VWAP')
         if 'Cloud_Top' in data.columns:
             ax1.plot(data.index, data['Cloud_Top'], color='blue', alpha=0.2, label='Cloud Top')
             ax1.fill_between(data.index, data['Cloud_Top'], data['Close'].min(), color='blue', alpha=0.05)
 
-        ax1.set_title(f"{ticker} Chart")
+        ax1.set_title(f"{ticker} V11 Chart")
         ax1.legend(); ax1.grid(True, alpha=0.3)
         ax2.bar(data.index, data['Volume'], color='gray', alpha=0.5)
-        ax2.set_ylabel("Volume")
-        ax2.grid(True, alpha=0.3)
+        
         buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=80); plt.close(fig); buf.seek(0)
         return buf.getvalue()
-    except Exception as e: return None
+    except Exception: return None
 
 # ==========================================
-# 3. CBRメモリシステム
+# 2. リスク管理 & メモリ & AI
 # ==========================================
+class RiskManager:
+    @staticmethod
+    def calculate_dynamic_exits(entry_price, atr, sl_mult=DEFAULT_ATR_SL_MULT, tp_mult=DEFAULT_ATR_TP_MULT, direction="BUY"):
+        if direction == "BUY":
+            sl = entry_price - (atr * sl_mult)
+            tp = entry_price + (atr * tp_mult)
+        return sl, tp
+
+    @staticmethod
+    def update_trailing_stop(current_price, current_sl, highest_price, atr, direction="BUY"):
+        if direction == "BUY":
+            new_sl = highest_price - (atr * 2.0) 
+            if new_sl > current_sl: return new_sl
+        return current_sl
+
 class MemorySystem:
     def __init__(self, csv_path):
         self.csv_path = csv_path
         self.scaler = StandardScaler()
         self.knn = None
         self.df = pd.DataFrame()
-        self.feature_cols = ['adx', 'prev_adx', 'ma_deviation', 'vol_ratio', 'expansion_rate', 'dist_to_res']
+        self.feature_cols = ['adx', 'ma_deviation', 'vol_ratio', 'vwap_dev', 'choppiness', 'rsi']
         self.load_and_train()
 
     def load_and_train(self):
         if not os.path.exists(self.csv_path): return
         try:
             self.df = pd.read_csv(self.csv_path)
-        except Exception: return
-        try:
             self.df.columns = [c.strip() for c in self.df.columns]
             if 'result' in self.df.columns:
                 valid_df = self.df[self.df['result'].isin(['WIN', 'LOSS'])].copy()
                 if len(valid_df) > 5:
+                    for col in self.feature_cols:
+                        if col not in valid_df.columns: valid_df[col] = 0
                     features = valid_df[self.feature_cols].fillna(0)
                     self.features_normalized = self.scaler.fit_transform(features)
                     self.valid_df_for_knn = valid_df 
@@ -308,62 +331,62 @@ class MemorySystem:
             res = str(row.get('result', ''))
             if res == 'WIN': win_c += 1
             if res == 'LOSS': loss_c += 1
-        
         rate = win_c / (win_c + loss_c) * 100 if (win_c + loss_c) > 0 else 0
         text += f"-> 勝率: {rate:.0f}% (勝{win_c}/負{loss_c})\n"
         return text
 
-# ==========================================
-# 4. AI エージェント (V9 Variable Prompt)
-# ==========================================
-def run_analyst(model, ticker, metrics, chart_bytes, cbr_text, strategy_mode):
+# ★ ここが不足していた関数です
+def ai_decision_maker_v11(model, chart_bytes, metrics, cbr_text, ticker):
+    rsi_context = f"{metrics['rsi']:.1f}"
+    if metrics['rsi'] > 70: rsi_context += " (Overbought)"
+    elif metrics['rsi'] < 30: rsi_context += " (Oversold)"
     
-    if strategy_mode == 'HOMERUN':
-        role_text = "あなたは「強気トレンドフォロワー」です。強いトレンドに乗って利益を最大化します。"
-        strategy_desc = "現在は「戦時(トレンド相場)」です。押し目より高値ブレイクを優先し、小さな過熱感は無視して大きく狙ってください。"
-        eval_focus = "1. MACD拡大中か？ 2. 雲の上か？ 3. 新高値更新の勢いがあるか？"
-    else:
-        role_text = "あなたは「逆張りスナイパー」です。レンジ相場での反発や押し目を狙います。"
-        strategy_desc = "現在は「平時(レンジ相場)」です。ブレイクアウトはダマシの可能性が高いです。RSIの売られすぎやバンド下限からの反発を狙ってください。"
-        eval_focus = "1. RSIは低位か？ 2. 移動平均線でのサポートはあるか？ 3. 下ヒゲなどの反発サインはあるか？"
-
+    chop_context = f"{metrics['choppiness']:.1f}"
+    if metrics['choppiness'] < 38.2: chop_context += " (Trending)"
+    elif metrics['choppiness'] > 61.8: chop_context += " (Choppy/Range)"
+    
     prompt = f"""
-### ROLE
-{role_text}
+### Role
+あなたはヘッジファンドのシニア・クオンツです。リスク管理を最優先します。
 
-### INPUT DATA
-銘柄: {ticker} (現在価格: {metrics['price']:.0f}円)
-モード: {strategy_mode}
+### Input Data
+銘柄: {ticker} (現在値: {metrics['price']:.0f}円)
 
-[テクニカル指標]
+[Market Regime]
+- Status: **{metrics['regime']}**
 - ADX: {metrics['adx']:.1f}
-- RSI(9): {metrics['rsi_9']:.1f}
-- MACD Hist: {metrics['macd_hist']:.2f} ({metrics['macd_trend']})
-- Cloud: {metrics['price_vs_cloud']}
+- Choppiness Index: {chop_context}
 
-### STRATEGY
-{strategy_desc}
-
-### EVALUATION FOCUS
-{eval_focus}
+[Advanced Indicators]
+- VWAP Deviation: {metrics['vwap_dev']:.2f}%
+- RSI(14): {rsi_context}
+- Cloud Position: {metrics['price_vs_cloud']}
 
 {cbr_text}
 
-### OUTPUT REQUIREMENT (JSON ONLY)
+### Task
+1. 局面分析: トレンドかレンジか？
+2. シグナル統合: 反転または継続のサインは？
+3. リスク評価: 勝算はあるか？
+
+### Output Requirement (JSON ONLY)
 {{
+  "thought_process": "...",
   "action": "BUY" or "HOLD",
   "confidence": 0-100,
-  "stop_loss": "推奨損切り価格",
-  "target_price": "推奨利確価格",
-  "reason": "判断理由(50文字以内)"
+  "sl_multiplier": {DEFAULT_ATR_SL_MULT},
+  "tp_multiplier": {DEFAULT_ATR_TP_MULT},
+  "reason": "理由(50文字以内)"
 }}
 """
     safety = {HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
     try:
         response = model.generate_content([prompt, {'mime_type': 'image/png', 'data': chart_bytes}], safety_settings=safety)
-        return response.text
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match: return json.loads(match.group(0))
     except Exception:
-        return "分析エラー"
+        return {"action": "HOLD", "reason": "AI Error", "confidence": 0}
 
 def run_commander_batch(model, candidates_data, current_cash, current_portfolio_text):
     candidates_text = ""
@@ -377,7 +400,7 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
         if final_max_shares < 1: final_max_shares = 1 
 
         candidates_text += f"""
---- 候補: {c['ticker']} (Mode: {c['mode']}) ---
+--- 候補: {c['ticker']} (Regime: {c['metrics']['regime']}) ---
 現在値: {c['metrics']['price']:.0f}円
 推奨最大株数: {final_max_shares}株
 【分析官報告】
@@ -386,20 +409,17 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
 """
 
     prompt = f"""
-あなたは冷徹な運用指令官（ファンドマネージャー）です。
-分析官から上がってきた有望銘柄のレポートと、現在の資金・ポートフォリオ状況を総合的に判断し、ベストな買い注文を決定してください。
+あなたは運用指令官です。分析官の報告に基づき、売買判断を下してください。
 
 ### 現在の状況
 - 手元資金: {current_cash:,.0f}円
 - 保有銘柄: {current_portfolio_text}
-- 全体方針: 資産防衛最優先。自信のある銘柄に絞る。
 
 ### 候補銘柄レポート
 {candidates_text}
 
-### あなたの任務
-**JSON形式**で、実際にエントリーする銘柄と数量のリストを出力してください。
-見送る銘柄はリストに含めなくて良いです。
+### 任務
+JSON形式で注文を出力してください。
 
 出力フォーマット:
 {{
@@ -409,7 +429,7 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
       "action": "BUY",
       "shares": 購入株数 (整数),
       "stop_loss": 損切り価格 (数値のみ),
-      "reason": "選定理由を50文字以内で"
+      "reason": "理由"
     }}
   ]
 }}
@@ -423,12 +443,11 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
     return {"orders": []}
 
 # ==========================================
-# 5. メイン実行
+# 5. メイン実行 (バックテスト)
 # ==========================================
 def main():
-    print(f"=== 🧪 酸性試験 (V9: Market Switching & Expanded List) ({START_DATE} ~ {END_DATE}) ===")
-    print(f"Logic: ADX<{MARKET_ADX_THRESHOLD} => Guerrilla (Target:Growth), ADX>={MARKET_ADX_THRESHOLD} => Homerun (Target:Core)")
-
+    print(f"=== 🧪 酸性試験 (V11: Evolutionary Adaptive Backtest) ({START_DATE} ~ {END_DATE}) ===")
+    
     memory = MemorySystem(LOG_FILE)
     try:
         model = genai.GenerativeModel(MODEL_NAME)
@@ -436,24 +455,15 @@ def main():
         print(f"Model Init Error: {e}")
         return
 
-    print("データ取得中...", end="")
-    # 1. 指数データの取得
-    nikkei = download_data_safe("^N225")
-    if nikkei is not None:
-        nikkei = calculate_technical_indicators(nikkei)
-        print("日経平均データ取得完了")
-    else:
-        print("日経平均データ取得失敗。デフォルトでCOREリストを使用します。")
-
-    # 2. 個別銘柄データの取得 (全銘柄)
+    print("データ取得中...")
     tickers_data = {}
-    all_tickers = sorted(list(set(LIST_CORE + LIST_GROWTH))) 
-    
-    for t in all_tickers:
+    for i, t in enumerate(TRAINING_LIST):
         df = download_data_safe(t)
         if df is not None:
-            df = calculate_technical_indicators(df)
-            tickers_data[t] = df
+            df = calculate_technical_indicators_v11(df)
+            if df is not None:
+                tickers_data[t] = df
+                print(".", end="", flush=True)
     print(f"\n完了 ({len(tickers_data)}銘柄)")
 
     all_dates = sorted(list(set([d for t in tickers_data for d in tickers_data[t].index])))
@@ -476,22 +486,7 @@ def main():
     for current_date in sim_dates:
         date_str = current_date.strftime('%Y-%m-%d')
 
-        # --- A. 環境認識 & リスト選択 ---
-        market_adx = 0
-        if nikkei is not None and current_date in nikkei.index:
-            market_adx = nikkei.loc[current_date]['ADX']
-        
-        # ★ここがスイッチングの肝
-        if market_adx >= MARKET_ADX_THRESHOLD:
-            todays_mode = 'HOMERUN'
-            target_list = LIST_CORE
-            mode_icon = "🔥" # 戦時
-        else:
-            todays_mode = 'GUERRILLA'
-            target_list = LIST_GROWTH
-            mode_icon = "☁️" # 平時
-
-        # --- B. ポートフォリオ管理 ---
+        # --- A. ポートフォリオ管理 ---
         closed_tickers = []
         for ticker, pos in portfolio.items():
             df = tickers_data[ticker]
@@ -502,9 +497,7 @@ def main():
             day_high = float(day_data['High'])
             day_open = float(day_data['Open'])
             
-            pos_mode = pos.get('mode', 'HOMERUN') 
-            
-            # 1. 損切り判定
+            # 1. 損切り判定 (SL)
             current_sl = float(pos['sl_price'])
             if day_low <= current_sl:
                 exec_price = current_sl
@@ -513,54 +506,49 @@ def main():
                 cash += proceeds
                 profit = proceeds - (pos['buy_price'] * pos['shares'])
                 profit_rate = (exec_price - pos['buy_price']) / pos['buy_price'] * 100
-                print(f"\n[{date_str}] 💀 損切({pos_mode}) {ticker}: {profit:+,.0f}円 ({profit_rate:+.2f}%)")
+                print(f"\n[{date_str}] 💀 損切 {ticker}: {profit:+,.0f}円 ({profit_rate:+.2f}%)")
                 trade_history.append({'Result': 'WIN' if profit>0 else 'LOSS', 'PL': profit})
                 closed_tickers.append(ticker)
                 continue
 
-            # 2. 利確判定 (ゲリラのみ)
-            if pos_mode == 'GUERRILLA':
-                target_price = pos['buy_price'] * (1 + GUERRILLA_TARGET)
-                if day_high >= target_price:
-                    exec_price = target_price
-                    if day_open > target_price: exec_price = day_open
-                    proceeds = exec_price * pos['shares']
-                    cash += proceeds
-                    profit = proceeds - (pos['buy_price'] * pos['shares'])
-                    profit_rate = (exec_price - pos['buy_price']) / pos['buy_price'] * 100
-                    print(f"\n[{date_str}] 💰 利確({pos_mode}) {ticker}: {profit:+,.0f}円 ({profit_rate:+.2f}%)")
-                    trade_history.append({'Result': 'WIN', 'PL': profit})
-                    closed_tickers.append(ticker)
-                    continue
-
-            # 3. トレーリングストップ (ホームランのみ)
-            if pos_mode == 'HOMERUN':
-                if day_high > pos['max_price']: pos['max_price'] = day_high
-                profit_pct_high = (pos['max_price'] - pos['buy_price']) / pos['buy_price']
-                if profit_pct_high > HOMERUN_TRAIL_TRIGGER:
-                    trail_dist = pos['atr'] * HOMERUN_TRAIL_WIDTH
-                    new_sl = pos['max_price'] - trail_dist
-                    if profit_pct_high > 0.15: new_sl = max(new_sl, pos['buy_price'] * 1.005)
-                    if new_sl > pos['sl_price']: pos['sl_price'] = new_sl
+            # 2. トレーリングストップ (RiskManager)
+            if day_high > pos['max_price']:
+                pos['max_price'] = day_high
+                new_sl = RiskManager.update_trailing_stop(day_data['Close'], current_sl, day_high, pos['atr'], "BUY")
+                if new_sl > current_sl:
+                    pos['sl_price'] = new_sl
+            
+            # 3. 利確 (TP)
+            current_tp = float(pos['tp_price'])
+            if day_high >= current_tp:
+                exec_price = current_tp
+                if day_open > current_tp: exec_price = day_open
+                proceeds = exec_price * pos['shares']
+                cash += proceeds
+                profit = proceeds - (pos['buy_price'] * pos['shares'])
+                profit_rate = (exec_price - pos['buy_price']) / pos['buy_price'] * 100
+                print(f"\n[{date_str}] 💰 利確 {ticker}: {profit:+,.0f}円 ({profit_rate:+.2f}%)")
+                trade_history.append({'Result': 'WIN', 'PL': profit})
+                closed_tickers.append(ticker)
+                continue
 
         for t in closed_tickers: del portfolio[t]
 
-        # --- C. 新規エントリー (対象リストのみスキャン) ---
-        if len(portfolio) < MAX_POSITIONS and cash > 10000:
+        # --- B. 新規エントリー ---
+        if len(portfolio) < MAX_POSITIONS and cash > 0:
             candidates_data = []
             
-            # その日のモードに合ったリストだけを見る
-            for ticker in target_list:
+            for ticker in tickers_data.keys():
                 if ticker in portfolio: continue
-                if ticker not in tickers_data: continue # データ取得失敗時
-                
                 df = tickers_data[ticker]
                 if current_date not in df.index: continue
                 idx = df.index.get_loc(current_date)
                 if idx < 60: continue
 
-                metrics = calculate_metrics_at_date(df, idx)
-                iron_rule_check = check_iron_rules(metrics)
+                metrics = calculate_metrics_v11(df, idx)
+                if metrics is None: continue
+
+                iron_rule_check = check_iron_rules_v11(metrics)
                 if iron_rule_check: continue 
 
                 if len(candidates_data) >= 5: break
@@ -569,10 +557,12 @@ def main():
                 if not chart_bytes: continue
                 similar_text = memory.get_similar_cases_text(metrics)
                 
-                # モードを渡してAIに判断させる
-                report = run_analyst(model, ticker, metrics, chart_bytes, similar_text, todays_mode)
-
-                candidates_data.append({'ticker': ticker, 'metrics': metrics, 'report': report, 'mode': todays_mode})
+                decision = ai_decision_maker_v11(model, chart_bytes, metrics, similar_text, ticker)
+                
+                report = f"Action: {decision.get('action')}, Conf: {decision.get('confidence')}%, Reason: {decision.get('reason')}"
+                decision['metrics'] = metrics 
+                
+                candidates_data.append({'ticker': ticker, 'metrics': metrics, 'report': report, 'ai_decision': decision})
                 time.sleep(1) 
 
             if candidates_data:
@@ -582,34 +572,35 @@ def main():
                 for order in decision_data.get('orders', []):
                     tic = order.get('ticker')
                     try:
-                        shares = int(order.get('shares', 0))
+                        raw_shares = order.get('shares', 0)
+                        if isinstance(raw_shares, str): raw_shares = float(raw_shares.replace(',', ''))
+                        shares = int(raw_shares)
                     except: shares = 0
 
                     if shares > 0:
                         target = next((c for c in candidates_data if c['ticker'] == tic), None)
                         if target:
                             metrics = target['metrics']
+                            ai_dec = target['ai_decision']
                             cost = shares * metrics['price']
+                            
                             if cost <= cash:
                                 cash -= cost
                                 atr_val = metrics['atr_value']
                                 
-                                # モードに応じた初期損切り
-                                if todays_mode == 'GUERRILLA':
-                                    stop_mult = GUERRILLA_STOP # 1.5
-                                else:
-                                    stop_mult = HOMERUN_STOP_INIT # 1.8
+                                sl_mult = float(ai_dec.get('sl_multiplier', DEFAULT_ATR_SL_MULT))
+                                tp_mult = float(ai_dec.get('tp_multiplier', DEFAULT_ATR_TP_MULT))
                                 
-                                initial_sl = metrics['price'] - atr_val * stop_mult
+                                initial_sl, initial_tp = RiskManager.calculate_dynamic_exits(metrics['price'], atr_val, sl_mult, tp_mult)
                                 
                                 portfolio[tic] = {
                                     'buy_price': metrics['price'], 'shares': shares,
-                                    'sl_price': initial_sl, 'max_price': metrics['price'], 'atr': atr_val,
-                                    'mode': todays_mode
+                                    'sl_price': initial_sl, 'tp_price': initial_tp,
+                                    'max_price': metrics['price'], 'atr': atr_val
                                 }
-                                print(f"\n[{date_str}] {mode_icon} 新規({todays_mode}) {tic}: {shares}株")
+                                print(f"\n[{date_str}] 🔴 新規 {tic}: {shares}株 (SL:{initial_sl:.0f})")
 
-        # --- D. 資産集計 ---
+        # --- C. 資産集計 ---
         current_equity = cash
         holdings_val = 0
         holdings_detail = []
@@ -619,9 +610,9 @@ def main():
                 val = price * pos['shares']
                 current_equity += val
                 holdings_val += val
-                holdings_detail.append(f"{t}({pos['mode'][0]})")
+                holdings_detail.append(f"{t}")
 
-        print(f"\r[{date_str}] {mode_icon}資産:{current_equity:,.0f} (H:{len(portfolio)})", end="")
+        print(f"\r[{date_str}] 資産:{current_equity:,.0f} (H:{len(portfolio)})", end="")
         equity_curve.append(current_equity)
 
         daily_history.append({
@@ -630,8 +621,7 @@ def main():
             "Cash": int(cash),
             "Holdings_Value": int(holdings_val),
             "Positions_Count": len(portfolio),
-            "Holdings_Detail": ", ".join(holdings_detail),
-            "Market_Mode": todays_mode
+            "Holdings_Detail": ", ".join(holdings_detail)
         })
 
     # --- 終了処理 ---
