@@ -38,16 +38,15 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
 
-# ★ V12 設定
-LOG_FILE = "ai_trade_memory_aggressive_v12.csv"
+# 設定
+LOG_FILE = "ai_trade_memory_aggressive_v12.csv"  # ファイル名を変更
 MODEL_NAME = 'models/gemini-2.0-flash'
 
-TRAINING_ROUNDS = 2000
+TRAINING_ROUNDS = 5000
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
 TRADE_BUDGET = 1000000 
 
-# ★ V12 ロジックパラメータ
 ADX_MIN = 20.0
 ADX_MAX = 40.0
 ROC_MAX = 15.0
@@ -81,45 +80,25 @@ def download_data_safe(ticker, period="5y", interval="1d", retries=3):
     for attempt in range(retries):
         try:
             logging.getLogger('yfinance').setLevel(logging.CRITICAL)
-            # print(f"   Downloading {ticker}...", end="")
-            
             df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-            
             if df.empty:
                 time.sleep(wait); wait *= 2
                 continue
-                
             if isinstance(df.columns, pd.MultiIndex):
                 try: df.columns = df.columns.get_level_values(0)
                 except: pass
-            
-            if len(df) < 200:
-                # print(f" -> Too short ({len(df)})")
-                return None
-            
-            # print(f" -> OK ({len(df)})")
+            if len(df) < 200: return None
             return df
-        except Exception:
+        except:
             time.sleep(wait); wait *= 2
     return None
 
 def calculate_market_filter(market_df):
-    """
-    市場環境フィルター (Market Regime Filter)
-    日経平均のトレンドを判定する
-    """
     try:
         df = market_df.copy()
         close = df['Close']
-        
-        # 移動平均線
         df['SMA25'] = close.rolling(25).mean()
         df['SMA200'] = close.rolling(200).mean()
-        
-        # 判定ロジック
-        # 1. 完全な強気: 価格 > 200MA
-        # 2. 回復期: 価格 < 200MA だが 価格 > 25MA (短期上昇)
-        # 3. 完全な弱気: 価格 < 200MA かつ 価格 < 25MA
         
         conditions = [
             (close > df['SMA200']),
@@ -127,29 +106,20 @@ def calculate_market_filter(market_df):
             (close <= df['SMA200']) & (close <= df['SMA25'])
         ]
         choices = ['Bullish', 'Recovery', 'Bearish']
-        
         df['Market_Regime'] = np.select(conditions, choices, default='Unknown')
         return df['Market_Regime']
-    except:
-        return None
+    except: return None
 
 def calculate_technical_indicators_v12(df):
-    """V12仕様: ROC, MFIを追加"""
     try:
         df = df.copy()
         close = df['Close']; high = df['High']; low = df['Low']; vol = df['Volume']
-        
-        # SMA
         df['SMA25'] = close.rolling(25).mean()
-        
-        # ATR (14)
         tr1 = high - low
         tr2 = abs(high - close.shift(1))
         tr3 = abs(low - close.shift(1))
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         df['ATR'] = tr.rolling(14).mean()
-        
-        # ADX (14)
         plus_dm = high.diff().clip(lower=0)
         minus_dm = low.diff().clip(upper=0).abs()
         plus_dm = np.where(plus_dm > minus_dm, plus_dm, 0)
@@ -160,51 +130,37 @@ def calculate_technical_indicators_v12(df):
         denom = (plus_di + minus_di).replace(0, np.nan)
         df['ADX'] = (abs(plus_di - minus_di) / denom) * 100
         df['ADX'] = df['ADX'].rolling(14).mean()
-
-        # RSI (14)
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss.replace(0, np.nan)
         df['RSI'] = 100 - (100 / (1 + rs))
         df['RSI'] = df['RSI'].fillna(50)
-
-        # MACD
         exp12 = close.ewm(span=12, adjust=False).mean()
         exp26 = close.ewm(span=26, adjust=False).mean()
         df['MACD'] = exp12 - exp26
         df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
         df['MACD_Hist'] = df['MACD'] - df['Signal']
-
-        # ROC (Rate of Change) - 10日間の変化率
         df['ROC'] = close.pct_change(10) * 100
-
-        # MFI (Money Flow Index) - 14日
-        typical_price = (high + low + close) / 3
-        money_flow = typical_price * vol
-        positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
-        negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(14).sum()
-        mfi_ratio = positive_flow / negative_flow.replace(0, np.nan)
-        df['MFI'] = 100 - (100 / (1 + mfi_ratio))
-        df['MFI'] = df['MFI'].fillna(50)
-
-        # VWAP
-        df['VP'] = typical_price * vol
+        tp = (high + low + close) / 3
+        df['VP'] = tp * vol
         cumulative_vp = df['VP'].rolling(window=VWAP_WINDOW).sum()
         cumulative_vol = vol.rolling(window=VWAP_WINDOW).sum().replace(0, np.nan)
         df['VWAP'] = cumulative_vp / cumulative_vol
         df['VWAP_Dev'] = np.where(df['VWAP'].notna(), ((close - df['VWAP']) / df['VWAP']) * 100, 0)
-        
-        # Cloud
+        money_flow = tp * vol
+        positive_flow = money_flow.where(tp > tp.shift(1), 0).rolling(14).sum()
+        negative_flow = money_flow.where(tp < tp.shift(1), 0).rolling(14).sum()
+        mfi_ratio = positive_flow / negative_flow.replace(0, np.nan)
+        df['MFI'] = 100 - (100 / (1 + mfi_ratio))
+        df['MFI'] = df['MFI'].fillna(50)
         tenkan = (high.rolling(9).max() + low.rolling(9).min()) / 2
         kijun = (high.rolling(26).max() + low.rolling(26).min()) / 2
         senkou_a = ((tenkan + kijun) / 2).shift(26)
         senkou_b = ((high.rolling(52).max() + low.rolling(52).min()) / 2).shift(26)
         df['Cloud_Top'] = pd.concat([senkou_a, senkou_b], axis=1).max(axis=1)
-
         return df.dropna()
-    except Exception:
-        return None
+    except Exception: return None
 
 def calculate_metrics_v12(df, idx, market_regime_series=None):
     try:
@@ -212,32 +168,24 @@ def calculate_metrics_v12(df, idx, market_regime_series=None):
         curr = df.iloc[idx]
         price = float(curr['Close'])
         
-        # 市場環境フィルタ (V12 Improved)
         market_regime = "Unknown"
         if market_regime_series is not None:
             target_date = df.index[idx]
-            # 日付が一致する市場データを検索（なければ直近）
             try:
                 if target_date in market_regime_series.index:
                     market_regime = market_regime_series.loc[target_date]
                 else:
-                    # 直前の営業日を探す
                     prev_loc = market_regime_series.index.get_indexer([target_date], method='pad')[0]
-                    if prev_loc != -1:
-                        market_regime = market_regime_series.iloc[prev_loc]
+                    if prev_loc != -1: market_regime = market_regime_series.iloc[prev_loc]
             except: pass
 
-        # V12 Metrics
         adx = float(curr.get('ADX', 20.0))
         roc = float(curr.get('ROC', 0.0))
         mfi = float(curr.get('MFI', 50.0))
         
-        if ADX_MIN <= adx <= ADX_MAX:
-            regime = "Trend Start/Growth"
-        elif adx > ADX_MAX:
-            regime = "Overheated Trend"
-        else:
-            regime = "Range/Weak"
+        if ADX_MIN <= adx <= ADX_MAX: regime = "Trend Start/Growth"
+        elif adx > ADX_MAX: regime = "Overheated Trend"
+        else: regime = "Range/Weak"
 
         recent_high = df['High'].iloc[idx-60:idx].max()
         dist_to_res = ((price - recent_high) / recent_high) * 100 if recent_high > 0 else 0
@@ -250,11 +198,12 @@ def calculate_metrics_v12(df, idx, market_regime_series=None):
         price_vs_cloud = "Above" if price > cloud_top else "Below"
 
         return {
+            'date': df.index[idx].strftime('%Y-%m-%d'),
             'price': price,
             'dist_to_res': dist_to_res,
             'ma_deviation': ma_deviation,
             'adx': adx,
-            'roc': roc, 
+            'roc': roc,
             'mfi': mfi,
             'atr_value': float(curr.get('ATR', price*0.01)),
             'macd_hist': macd_hist,
@@ -263,39 +212,30 @@ def calculate_metrics_v12(df, idx, market_regime_series=None):
             'rsi': float(curr.get('RSI', 50.0)),
             'regime': regime,
             'vwap_dev': float(curr.get('VWAP_Dev', 0.0)),
-            'market_regime': market_regime # V12追加
+            'market_regime': market_regime
         }
     except Exception: return None
 
 def check_iron_rules_v12(metrics):
-    # 1. 市場環境フィルター (V12 Modified)
-    # Bearish (200MA以下 & 25MA以下) の時は「冬の時代」なので取引停止
-    if metrics['market_regime'] == 'Bearish':
-        return "Market Bearish (Wait for Recovery)"
-        
-    # 2. 個別銘柄フィルター
+    if metrics['market_regime'] == 'Bearish': return "Market Bearish"
     if metrics['roc'] > ROC_MAX: return f"ROC Too High ({metrics['roc']:.1f}%)"
     if metrics['adx'] > 50: return "ADX Overheat (>50)"
     if metrics['price_vs_cloud'] == "Below": return "Below Cloud"
     return None
 
-# ==========================================
-# 2. メモリシステム
-# ==========================================
-class CaseBasedMemory:
+class MemorySystem:
     def __init__(self, csv_path):
         self.csv_path = csv_path
         self.scaler = StandardScaler()
         self.knn = None
         self.df = pd.DataFrame()
-        # V12特徴量
         self.feature_cols = ['adx', 'roc', 'mfi', 'vwap_dev', 'rsi']
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "target_price", 
             "Actual_High", "Price", 
             "adx", "roc", "mfi", "vwap_dev", "rsi", 
-            "regime", "market_regime", "profit_rate" # market_regime追加
+            "regime", "market_regime", "profit_rate"
         ]
         self.load_and_train()
 
@@ -317,7 +257,7 @@ class CaseBasedMemory:
                     self.knn.fit(self.features_normalized)
         except Exception: pass
 
-    def search_similar_cases(self, current_metrics):
+    def get_similar_cases_text(self, current_metrics):
         if self.knn is None: return "（データ不足）"
         try:
             vec = [current_metrics.get(col, 0) for col in self.feature_cols]
@@ -337,70 +277,56 @@ class CaseBasedMemory:
         except: return "（検索エラー）"
 
     def save_experience(self, data_dict):
+        # ★★★ 修正箇所: 安全な保存処理 ★★★
         new_df = pd.DataFrame([data_dict])
-        for col in self.csv_columns:
-            if col not in new_df.columns: new_df[col] = None
+        
+        # カラム順序を定義に合わせて並べ替え
         save_cols = [c for c in self.csv_columns if c in new_df.columns]
         new_df = new_df[save_cols]
+        
         try:
+            # ファイルが存在しない場合はヘッダー付きで新規作成
             if not os.path.exists(self.csv_path):
                 new_df.to_csv(self.csv_path, index=False, encoding='utf-8-sig')
             else:
+                # 存在する場合はヘッダーなしで追記 (mode='a')
                 new_df.to_csv(self.csv_path, mode='a', header=False, index=False, encoding='utf-8-sig')
+            
+            # 再学習
             self.load_and_train() 
-        except Exception: pass
+        except Exception as e:
+            print(f"❌ 保存エラー: {e}")
 
-# ==========================================
-# 3. AIエージェント
-# ==========================================
 def create_chart_image(df, name):
     try:
         data = df.tail(80).copy()
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
-        
         ax1.plot(data.index, data['Close'], color='black', label='Close')
-        if 'SMA25' in data.columns:
-            ax1.plot(data.index, data['SMA25'], color='green', alpha=0.5, label='SMA25')
         if 'VWAP' in data.columns:
             ax1.plot(data.index, data['VWAP'], color='orange', alpha=0.7, linestyle='--', label='VWAP')
         if 'Cloud_Top' in data.columns:
             ax1.fill_between(data.index, data['Cloud_Top'], data['Close'].min(), color='blue', alpha=0.05)
-
-        ax1.set_title(f"{name} V12 Early Trend Hunter")
+        ax1.set_title(f"{name} V12 Chart")
         ax1.legend(); ax1.grid(True, alpha=0.3)
         ax2.bar(data.index, data['Volume'], color='gray', alpha=0.5)
-        
         buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=80); plt.close(fig); buf.seek(0)
         return buf.getvalue()
     except Exception: return None
 
 def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
-    # V12 Prompt: Early Trend Hunter
     prompt = f"""
 ### Role
-あなたは「トレンド初動ハンター」です。成熟したトレンド（高値掴み）を避け、これから伸びる「初動」のみを狙います。
+あなたは「トレンド初動ハンター」です。
 
 ### Input Data
 銘柄: {ticker} (現在値: {metrics['price']:.0f}円)
 
-[Early Trend Indicators]
-- **ADX**: {metrics['adx']:.1f} (理想: 20-35)
-- **ROC(10)**: {metrics['roc']:.1f}% (高すぎると危険)
-- **MFI**: {metrics['mfi']:.1f} (資金流入)
-- **Regime**: **{metrics['regime']}**
-- **Market**: **{metrics['market_regime']}** (市場全体の地合い)
-
-[Confirmation]
-- VWAP Deviation: {metrics['vwap_dev']:.2f}%
-- RSI(14): {metrics['rsi']:.1f}
-- Cloud Position: {metrics['price_vs_cloud']}
+[Market Data]
+- ADX: {metrics['adx']:.1f}
+- ROC(10): {metrics['roc']:.1f}%
+- Market Regime: {metrics['market_regime']}
 
 {cbr_text}
-
-### Task
-1. **初動判定**: ADXは上昇傾向にあり、かつ過熱しすぎていないか？
-2. **押し目確認**: ROCが高すぎないか？ VWAP付近での反発か？
-3. **リスク評価**: 過去の勝率は？
 
 ### Output Requirement (JSON ONLY)
 {{
@@ -409,7 +335,7 @@ def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
   "confidence": 0-100,
   "sl_multiplier": 2.5,
   "tp_multiplier": 5.0,
-  "reason": "理由(50文字以内)"
+  "reason": "理由"
 }}
 """
     safety = {HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
@@ -418,23 +344,17 @@ def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
         text = response.text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match: return json.loads(match.group(0))
-    except Exception:
-        return {"action": "HOLD", "reason": "AI Error", "confidence": 0}
+    except: return {"action": "HOLD", "reason": "Error", "confidence": 0}
 
-# ==========================================
-# 4. メイン実行 (トレーニングモード)
-# ==========================================
 def main():
-    start_time = time.time()
-    print(f"=== AI強化合宿 [AGGRESSIVE V12] (Early Trend Hunter) ===")
-    
-    memory_system = CaseBasedMemory(LOG_FILE) 
+    print(f"=== AI強化合宿 [AGGRESSIVE V12] (Fixed Save) ===")
+    start_time = time.time()    
+    memory = MemorySystem(LOG_FILE) 
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
     except Exception as e: print(f"Model Init Error: {e}"); return
 
     print("データ取得中...", end="")
     
-    # 1. 市場データ取得 (日経平均)
     nikkei = download_data_safe("^N225")
     market_regime_series = None
     if nikkei is not None:
@@ -443,14 +363,12 @@ def main():
     
     processed_data = {}
     for i, t in enumerate(TRAINING_LIST):
-        df = download_data_safe(t, period="5y") 
-        if df is None: continue
-        
-        df = calculate_technical_indicators_v12(df)
+        df = download_data_safe(t)
         if df is not None:
-            processed_data[t] = df
-            print(".", end="", flush=True)
-            
+            df = calculate_technical_indicators_v12(df)
+            if df is not None:
+                processed_data[t] = df
+                print(".", end="", flush=True)
     print(f"\nデータ取得完了 ({len(processed_data)}銘柄)")
 
     if not processed_data:
@@ -473,11 +391,10 @@ def main():
         
         if metrics is None: continue
 
-        # V12 Iron Rule (Market Filter included)
         iron_rule = check_iron_rules_v12(metrics)
         if iron_rule: continue
 
-        cbr_text = memory_system.search_similar_cases(metrics)
+        cbr_text = memory.get_similar_cases_text(metrics)
         past_df = df.iloc[:target_idx+1]
         chart_bytes = create_chart_image(past_df, ticker)
         
@@ -559,7 +476,7 @@ def main():
             'market_regime': metrics['market_regime'],
             'profit_rate': profit_rate 
         }
-        memory_system.save_experience(save_data)
+        memory.save_experience(save_data)
         time.sleep(1)
 
     elapsed_time = time.time() - start_time
