@@ -14,7 +14,7 @@ FILES = {
     "🛡️ 資産防衛型": "ai_trade_memory_risk_managed.csv",
 }
 
-PAGE_TITLE = "📊 AI Trade Analysis Dashboard V8"
+PAGE_TITLE = "📊 AI Trade Analysis Dashboard V11"
 LAYOUT = "wide"
 
 # ==========================================
@@ -33,24 +33,12 @@ def load_data(csv_file):
 
         df['Date'] = pd.to_datetime(df['Date'])
         
-        # 数値変換 (V7の新カラム含む)
-        numeric_cols = [
-            'profit_rate', 'Confidence', 'Price', 
-            'adx', 'ma_deviation', 'vol_ratio', 'dist_to_res',
-            'Actual_High', 'target_price', 'Target_Reach',
-            'macd_hist' # V7追加
-        ]
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        # 数値変換 (エラー回避)
+        num_cols = ['profit_rate', 'adx', 'ma_deviation', 'vol_ratio', 'rsi', 'vwap_dev', 'choppiness']
+        for c in num_cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors='coerce')
 
-        # 損益額シミュレーション (1トレード100万円換算)
-        if 'profit_loss' not in df.columns:
-            df['profit_loss'] = df['profit_rate'] * 10000 
-            
-        df = df.sort_values('Date')
-        df['cumulative_profit'] = df['profit_loss'].cumsum()
-        
         return df, None
     except Exception as e:
         return None, f"読み込みエラー: {e}"
@@ -58,119 +46,127 @@ def load_data(csv_file):
 # ==========================================
 # 2. メインアプリ
 # ==========================================
-def main():
-    st.set_page_config(page_title=PAGE_TITLE, layout=LAYOUT)
-    st.title(PAGE_TITLE)
-    
-    # --- サイドバー ---
-    st.sidebar.header("⚙️ 設定")
-    selected_mode = st.sidebar.radio("分析ファイル選択", list(FILES.keys()), index=0)
-    target_file = FILES[selected_mode]
-    
-    st.sidebar.markdown("---")
-    
-    df, error_msg = load_data(target_file)
-    if df is None:
-        st.error(f"⚠️ {error_msg}")
-        st.info("※ V7を選択している場合、先にトレーニングスクリプト(v7)を実行してCSVを作成してください。")
-        # フォールバック: 存在するファイルを探す提案
-        existing = [f for f in FILES.values() if os.path.exists(f)]
-        if existing:
-            st.warning(f"現在利用可能なファイル: {', '.join(existing)}")
-        return
+st.set_page_config(page_title=PAGE_TITLE, layout=LAYOUT)
+st.title(PAGE_TITLE)
 
-    if df.empty:
-        st.warning("データが空です。")
-        return
+# サイドバー: ファイル選択
+selected_file_label = st.sidebar.selectbox("分析対象ファイル", list(FILES.keys()))
+csv_path = FILES[selected_file_label]
 
-    # 銘柄フィルター
-    all_tickers = ["All"] + sorted(list(df['Ticker'].unique()))
-    selected_ticker = st.sidebar.selectbox("銘柄フィルター", all_tickers)
-    if selected_ticker != "All":
-        df = df[df['Ticker'] == selected_ticker]
+df, error = load_data(csv_path)
 
-    # --- KPI エリア ---
-    df_finished = df[df['result'].isin(['WIN', 'LOSS'])]
+if error:
+    st.error(error)
+else:
+    # フィルタリング (完了したトレードのみ)
+    df_finished = df[df['result'].isin(['WIN', 'LOSS', 'HOMERUN'])].copy()
+    
+    # KPI計算
     total_trades = len(df_finished)
-    wins = df_finished[df_finished['result'] == 'WIN']
-    losses = df_finished[df_finished['result'] == 'LOSS']
+    win_trades = len(df_finished[df_finished['result'].isin(['WIN', 'HOMERUN'])])
+    win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
     
-    win_rate = len(wins) / total_trades * 100 if total_trades > 0 else 0
-    total_profit = df_finished['profit_loss'].sum()
-    pf = wins['profit_loss'].sum() / abs(losses['profit_loss'].sum()) if not losses.empty else float('inf')
+    avg_profit = df_finished[df_finished['profit_rate'] > 0]['profit_rate'].mean()
+    avg_loss = df_finished[df_finished['profit_rate'] < 0]['profit_rate'].mean()
+    profit_factor = abs(df_finished[df_finished['profit_rate'] > 0]['profit_rate'].sum() / 
+                        df_finished[df_finished['profit_rate'] < 0]['profit_rate'].sum()) if len(df_finished[df_finished['profit_rate'] < 0]) > 0 else 0
 
-    # ★修正箇所: 変数名を統一しました
-    target_reach_kpi = "-" 
-    if 'Target_Reach' in df.columns:
-        reached = df_finished[df_finished['Target_Reach'] >= 100]
-        rate = len(reached) / total_trades * 100 if total_trades > 0 else 0
-        target_reach_kpi = f"{rate:.1f}%"
-
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("総トレード", f"{total_trades}")
-    k2.metric("勝率", f"{win_rate:.1f}%")
-    k3.metric("合計損益 (100万)", f"{total_profit:,.0f}円", delta_color="normal")
-    k4.metric("PF", f"{pf:.2f}")
-    k5.metric("目標到達率", target_reach_kpi)
+    # --- KPI表示 ---
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("総トレード数", total_trades)
+    c2.metric("勝率", f"{win_rate:.1f}%")
+    c3.metric("平均利益", f"+{avg_profit:.2f}%" if pd.notnull(avg_profit) else "-")
+    c4.metric("平均損失", f"{avg_loss:.2f}%" if pd.notnull(avg_loss) else "-")
+    c5.metric("プロフィットファクター", f"{profit_factor:.2f}")
 
     st.markdown("---")
 
-    # --- グラフエリア 1: 資産推移 ---
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        st.subheader("📈 資産推移")
-        fig = px.line(df_finished, x='Date', y='cumulative_profit', markers=True)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with c2:
-        st.subheader("📊 勝ち負け分布")
-        fig_hist = px.histogram(df_finished, x='profit_rate', color='result', nbins=30, title="利益率分布")
-        st.plotly_chart(fig_hist, use_container_width=True)
+    # --- V11 特有の分析 (タブ切り替え) ---
+    t1, t2, t3, t4, t5 = st.tabs(["📈 損益分布", "📊 テクニカル分析", "🌪️ ボラティリティ & レジーム", "🧠 AI思考", "📝 詳細データ"])
 
-    # --- グラフエリア 2: 要因分析 (V7対応) ---
-    st.subheader("🔬 要因分析")
-    t1, t2, t3 = st.columns(3)
-    
     with t1:
-        if 'adx' in df.columns:
-            fig = px.scatter(df_finished, x='adx', y='profit_rate', color='result', title="ADX vs 利益")
-            st.plotly_chart(fig, use_container_width=True)
-    
+        # 損益ヒストグラム
+        fig = px.histogram(df_finished, x='profit_rate', color='result', nbins=50, 
+                           title="損益率分布", color_discrete_map={'WIN':'blue', 'LOSS':'red', 'HOMERUN':'gold'})
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # 累積損益 (単利ベースの簡易シミュレーション)
+        df_finished = df_finished.sort_values('Date')
+        df_finished['cumulative_profit'] = df_finished['profit_rate'].cumsum()
+        fig2 = px.line(df_finished, x='Date', y='cumulative_profit', title="累積損益率の推移")
+        st.plotly_chart(fig2, use_container_width=True)
+
     with t2:
-        # V7新指標: MACDヒストグラム
-        if 'macd_hist' in df.columns:
-            fig = px.scatter(df_finished, x='macd_hist', y='profit_rate', color='result', title="MACD Hist vs 利益")
-            fig.add_vline(x=0, line_dash="dash")
+        c_left, c_right = st.columns(2)
+        
+        with c_left:
+            # ADX vs 損益
+            fig = px.scatter(df_finished, x='adx', y='profit_rate', color='result', title="ADX vs 利益率")
             st.plotly_chart(fig, use_container_width=True)
-        elif 'ma_deviation' in df.columns:
-            fig = px.scatter(df_finished, x='ma_deviation', y='profit_rate', color='result', title="MA乖離 vs 利益")
+            
+            # MA乖離率 vs 損益
+            fig = px.scatter(df_finished, x='ma_deviation', y='profit_rate', color='result', title="MA乖離 vs 利益率")
             st.plotly_chart(fig, use_container_width=True)
+
+        with c_right:
+            # RSI vs 損益 (V11)
+            if 'rsi' in df.columns:
+                fig = px.scatter(df_finished, x='rsi', y='profit_rate', color='result', title="RSI vs 利益率")
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # VWAP乖離 vs 損益 (V11)
+            if 'vwap_dev' in df.columns:
+                fig = px.scatter(df_finished, x='vwap_dev', y='profit_rate', color='result', title="VWAP乖離 vs 利益率")
+                st.plotly_chart(fig, use_container_width=True)
 
     with t3:
-        # V7新指標: 雲との位置関係
-        if 'price_vs_cloud' in df.columns:
-            cloud_stats = df_finished.groupby('price_vs_cloud')['result'].apply(lambda x: (x=='WIN').mean()*100).reset_index()
-            fig = px.bar(cloud_stats, x='price_vs_cloud', y='result', title="雲(Cloud)と勝率", labels={'result':'勝率%'})
-            st.plotly_chart(fig, use_container_width=True)
-        elif 'vol_ratio' in df.columns:
-            df['vol_bin'] = pd.cut(df['vol_ratio'], bins=[0,0.8,1.2,2.0,10])
-            vol_stats = df.groupby('vol_bin')['result'].apply(lambda x: (x=='WIN').mean()*100).reset_index()
-            fig = px.bar(vol_stats, x=vol_stats['vol_bin'].astype(str), y='result', title="出来高倍率と勝率")
+        # V11 レジーム分析
+        if 'regime' in df.columns:
+            st.subheader("🌍 市場局面 (Regime) 別パフォーマンス")
+            regime_stats = df_finished.groupby('regime').agg(
+                Trades=('result', 'count'),
+                WinRate=('result', lambda x: (x.isin(['WIN', 'HOMERUN'])).mean() * 100),
+                AvgProfit=('profit_rate', 'mean')
+            ).reset_index()
+            
+            c_r1, c_r2 = st.columns(2)
+            with c_r1:
+                fig = px.bar(regime_stats, x='regime', y='WinRate', title="局面別 勝率", color='WinRate')
+                st.plotly_chart(fig, use_container_width=True)
+            with c_r2:
+                fig = px.bar(regime_stats, x='regime', y='AvgProfit', title="局面別 平均利益率", color='AvgProfit')
+                st.plotly_chart(fig, use_container_width=True)
+
+        if 'choppiness' in df.columns:
+            st.subheader("🌊 Choppiness Index (トレンド強度)")
+            fig = px.histogram(df_finished, x='choppiness', color='result', nbins=30, title="CHOP指数の分布と勝敗")
             st.plotly_chart(fig, use_container_width=True)
 
-    # --- データ詳細 ---
-    st.subheader("📝 トレード詳細")
-    
-    cols = ['Date', 'Ticker', 'Action', 'result', 'profit_rate', 'Reason', 'Actual_High', 'target_price']
-    # 存在するカラムのみ表示
-    show_cols = [c for c in cols if c in df.columns]
-    
-    st.dataframe(
-        df[show_cols].sort_values('Date', ascending=False)
-        .style.applymap(lambda x: 'color: red' if x=='LOSS' else 'color: green' if x=='WIN' else '', subset=['result'])
-        .format({'profit_rate': '{:.2f}%'}),
-        use_container_width=True
-    )
+    with t4:
+        # V11 CoT分析
+        st.subheader("🧠 AIの判断ロジック (Chain of Thought)")
+        
+        # RSI Divergence
+        if 'rsi_divergence' in df.columns:
+            div_counts = df_finished['rsi_divergence'].value_counts().reset_index()
+            div_counts.columns = ['Divergence Type', 'Count']
+            fig = px.pie(div_counts, values='Count', names='Divergence Type', title="RSIダイバージェンス検出比率")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.write("**ダイバージェンス発生時の平均利益:**")
+            st.dataframe(df_finished.groupby('rsi_divergence')['profit_rate'].mean())
 
-if __name__ == "__main__":
-    main()
+    with t5:
+        # データ詳細
+        st.subheader("📝 トレード詳細データ")
+        
+        # V11用の表示カラム選択
+        display_cols = ['Date', 'Ticker', 'Action', 'result', 'profit_rate', 'Reason']
+        v11_cols = ['regime', 'rsi', 'vwap_dev', 'choppiness', 'rsi_divergence']
+        
+        # 存在するカラムだけ追加
+        for c in v11_cols:
+            if c in df.columns:
+                display_cols.append(c)
+                
+        st.dataframe(df_finished[display_cols].sort_values('Date', ascending=False), use_container_width=True)
