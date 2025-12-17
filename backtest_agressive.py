@@ -15,50 +15,67 @@ import re
 import logging
 
 # ==========================================
-# ★設定エリア: V8 (Adaptive Guerrilla) バックテスト
+# ★設定エリア: V9 (Expanded List)
 # ==========================================
 START_DATE = "2023-01-01"
 END_DATE   = "2025-11-30"
 
 INITIAL_CAPITAL = 100000
 RISK_PER_TRADE = 0.40      
-MAX_POSITIONS = 10         
-MAX_INVEST_RATIO = 0.4   
+MAX_POSITIONS = 12         # 銘柄増えたので最大保有数も少し増やす
+MAX_INVEST_RATIO = 0.4    # 分散投資のため1銘柄の上限を40%に
 
-# ★ V8 ロジックパラメータ
-ADX_THRESHOLD = 30.0           # 戦時/平時の分岐点
+# ★ V9 ロジックパラメータ
+MARKET_ADX_THRESHOLD = 25.0    
 
-# [A] ゲリラモード (ADX < 30)
-GUERRILLA_TARGET = 0.05        # 固定利確 +5%
-GUERRILLA_STOP = 1.5           # タイトな損切り (ATR x 1.5)
+# [A] ゲリラモード 
+GUERRILLA_TARGET = 0.06        
+GUERRILLA_STOP = 1.5           
 
-# [B] ホームランモード (ADX >= 30) - V7継承
-HOMERUN_STOP_INIT = 1.8        # 初期損切り (ATR x 1.8)
-HOMERUN_TRAIL_TRIGGER = 0.10   # トレーリング開始 (+10%)
-HOMERUN_TRAIL_WIDTH = 2.0      # 追従幅 (ATR x 2.0)
+# [B] ホームランモード
+HOMERUN_STOP_INIT = 1.8        
+HOMERUN_TRAIL_TRIGGER = 0.10   
+HOMERUN_TRAIL_WIDTH = 2.0      
 
 # 保存ファイル名
-LOG_FILE = "ai_trade_memory_aggressive_v7.csv" # メモリはV7を流用可能
-HISTORY_CSV = "backtest_history_v8.csv" 
+LOG_FILE = "ai_trade_memory_aggressive_v9_exp.csv" 
+HISTORY_CSV = "backtest_history_v9_exp.csv" 
 
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
 MODEL_NAME = 'models/gemini-2.0-flash'
 
-# 監視銘柄リスト
-TRAINING_LIST = [
-    "6254.T", "8035.T", "2768.T", "6305.T", "6146.T",
-    "6920.T", "6857.T", "7735.T", "6723.T", "6963.T", "3436.T", "6526.T", "6315.T",
-    "6758.T", "6861.T", "6981.T", "6594.T", "6954.T", "6506.T", "6702.T", "6752.T", "7751.T", "6501.T", "6503.T",
-    "7203.T", "7267.T", "7269.T", "7270.T", "7201.T", "7259.T", "6902.T",
-    "7011.T", "7013.T", "7012.T", "6301.T", "6367.T", "7003.T",
-    "8058.T", "8001.T", "8031.T", "8002.T", "8053.T", "7459.T",
-    "8306.T", "8316.T", "8411.T", "8766.T", "8725.T", "8591.T", "8604.T", "8698.T",
-    "9984.T", "9432.T", "9433.T", "9434.T", "6098.T", "2413.T", "4661.T", "4385.T", "4751.T", "9613.T",
-    "9983.T", "3382.T", "8267.T", "2802.T", "2914.T", "4911.T", "4543.T", "4503.T", "4568.T",
-    "7974.T", "9697.T", "9766.T", "5253.T", 
-    "9101.T", "9104.T", "9107.T", "5401.T", "5411.T", "1605.T", "5713.T", "5020.T", "4063.T", "4901.T"
+# === 銘柄リスト (拡張版) ===
+
+# 1. 主力・大型株リスト (トレンド相場で輝く: CORE)
+LIST_CORE = [
+    # 半導体・ハイテク
+    "8035.T", "6857.T", "6146.T", "6920.T", "6758.T", "6702.T", "6501.T", "6503.T", "7751.T", "4063.T", "6981.T", "6723.T",
+    # 自動車・機械
+    "7203.T", "7267.T", "6902.T", "6301.T", "6367.T", "7011.T", "7013.T", 
+    # 金融・商社
+    "8306.T", "8316.T", "8411.T", "8766.T", "8058.T", "8001.T", "8031.T", "8002.T", "9984.T",
+    # 内需・通信・その他
+    "9432.T", "9983.T", "4568.T", "4543.T", "4661.T", "7974.T", "6506.T"
 ]
+
+# 2. 中小型・材料株・高ボラリスト (レンジ相場で輝く: GROWTH)
+LIST_GROWTH = [
+    # AI・SaaS・ネット
+    "5253.T", "5032.T", "9166.T", "4385.T", "4478.T", "4483.T", "3993.T", "4180.T", "3687.T", "6027.T",
+    # 宇宙・防衛・深海
+    "5595.T", "9348.T", "7012.T", "6203.T", "186A", # 186Aはアストロスケール(対応していれば)
+    # 半導体中小型
+    "6254.T", "6315.T", "6526.T", "6228.T", "6963.T", "3436.T", "7735.T", "6890.T",
+    # エンタメ・消費
+    "2768.T", "7342.T", "2413.T", "2222.T", "7532.T", "3092.T",
+    # 海運・資源・市況
+    "9101.T", "9104.T", "9107.T", "1605.T", "5713.T", "5401.T", "5411.T"
+]
+
+# 重複除去 & ソート
+LIST_CORE = sorted(list(set(LIST_CORE)))
+LIST_GROWTH = sorted(list(set(LIST_GROWTH)))
 
 plt.rcParams['font.family'] = 'sans-serif'
 
@@ -84,7 +101,7 @@ else:
     genai.configure(api_key=GOOGLE_API_KEY)
 
 # ==========================================
-# 1. データ取得 & テクニカル計算 (V7仕様)
+# 1. データ取得 & テクニカル計算
 # ==========================================
 def download_data_safe(ticker, period="5y", interval="1d", retries=3): 
     wait = 2
@@ -161,7 +178,6 @@ def calculate_metrics_at_date(df, idx):
     
     adx = float(curr['ADX'])
     prev_adx = float(df['ADX'].iloc[idx-1])
-    
     sma25 = float(curr['SMA25'])
     ma_deviation = ((price / sma25) - 1) * 100
     
@@ -191,10 +207,11 @@ def calculate_metrics_at_date(df, idx):
     upper_shadow = high_p - body_top
     total_range = high_p - low_p
     shadow_ratio = upper_shadow / total_range if total_range > 0 else 0
-    candle_shape = "Good" if shadow_ratio < 0.3 else "Bad (Long Upper Shadow)"
+    candle_shape = "Good" if shadow_ratio < 0.3 else "Bad"
 
     return {
         'price': price,
+        'resistance_price': recent_high,
         'dist_to_res': dist_to_res,
         'ma_deviation': ma_deviation,
         'adx': adx,
@@ -214,25 +231,21 @@ def calculate_metrics_at_date(df, idx):
     }
 
 # ==========================================
-# 2. 鉄の掟 & 補助関数 (V7)
+# 2. 鉄の掟 & 補助関数
 # ==========================================
 def check_iron_rules(metrics):
     if metrics['adx'] < 20: return "ADX<20"
     if metrics['vol_ratio'] < 0.8: return "Vol<0.8"
-    
     ma_dev = metrics['ma_deviation']
     if 10.0 <= ma_dev <= 15.0: return f"DangerZone({ma_dev:.1f}%)"
     if metrics['adx'] > 55: return "ADX Overheat"
-    
-    if metrics['price_vs_cloud'] == "Below": return "Below Ichimoku Cloud"
-    
+    if metrics['price_vs_cloud'] == "Below": return "Below Cloud"
     return None
 
 def create_chart_image_at_date(df, idx, ticker):
     try:
         data = df.iloc[idx-60:idx+1].copy()
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
-
         sma20 = data['Close'].rolling(20).mean()
         std20 = data['Close'].rolling(20).std()
         ax1.plot(data.index, data['Close'], color='black', label='Close')
@@ -243,16 +256,14 @@ def create_chart_image_at_date(df, idx, ticker):
             ax1.plot(data.index, data['Cloud_Top'], color='blue', alpha=0.2, label='Cloud Top')
             ax1.fill_between(data.index, data['Cloud_Top'], data['Close'].min(), color='blue', alpha=0.05)
 
-        ax1.set_title(f"{ticker} V7 Chart")
+        ax1.set_title(f"{ticker} Chart")
         ax1.legend(); ax1.grid(True, alpha=0.3)
         ax2.bar(data.index, data['Volume'], color='gray', alpha=0.5)
         ax2.set_ylabel("Volume")
         ax2.grid(True, alpha=0.3)
         buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=80); plt.close(fig); buf.seek(0)
         return buf.getvalue()
-    except Exception as e:
-        print(f"Chart Error: {e}")
-        return None
+    except Exception as e: return None
 
 # ==========================================
 # 3. CBRメモリシステム
@@ -271,15 +282,11 @@ class MemorySystem:
         try:
             self.df = pd.read_csv(self.csv_path)
         except Exception: return
-
         try:
             self.df.columns = [c.strip() for c in self.df.columns]
             if 'result' in self.df.columns:
                 valid_df = self.df[self.df['result'].isin(['WIN', 'LOSS'])].copy()
                 if len(valid_df) > 5:
-                    for col in self.feature_cols:
-                        if col not in valid_df.columns: valid_df[col] = 0
-                    
                     features = valid_df[self.feature_cols].fillna(0)
                     self.features_normalized = self.scaler.fit_transform(features)
                     self.valid_df_for_knn = valid_df 
@@ -307,51 +314,47 @@ class MemorySystem:
         return text
 
 # ==========================================
-# 4. AI エージェント (V7 Sniper)
+# 4. AI エージェント (V9 Variable Prompt)
 # ==========================================
-def run_analyst(model, ticker, metrics, chart_bytes, cbr_text):
+def run_analyst(model, ticker, metrics, chart_bytes, cbr_text, strategy_mode):
+    
+    if strategy_mode == 'HOMERUN':
+        role_text = "あなたは「強気トレンドフォロワー」です。強いトレンドに乗って利益を最大化します。"
+        strategy_desc = "現在は「戦時(トレンド相場)」です。押し目より高値ブレイクを優先し、小さな過熱感は無視して大きく狙ってください。"
+        eval_focus = "1. MACD拡大中か？ 2. 雲の上か？ 3. 新高値更新の勢いがあるか？"
+    else:
+        role_text = "あなたは「逆張りスナイパー」です。レンジ相場での反発や押し目を狙います。"
+        strategy_desc = "現在は「平時(レンジ相場)」です。ブレイクアウトはダマシの可能性が高いです。RSIの売られすぎやバンド下限からの反発を狙ってください。"
+        eval_focus = "1. RSIは低位か？ 2. 移動平均線でのサポートはあるか？ 3. 下ヒゲなどの反発サインはあるか？"
+
     prompt = f"""
 ### ROLE
-あなたは「高精度スナイパー・トレンドフォローAI」です。
-ダマシ(False Breakout)を極限まで回避し、本物のトレンド初動のみを狙撃します。
+{role_text}
 
 ### INPUT DATA
 銘柄: {ticker} (現在価格: {metrics['price']:.0f}円)
+モード: {strategy_mode}
 
-[基本指標]
-1. Trend (ADX): {metrics['adx']:.1f} (閾値25以上)
-2. Direction: +DI({metrics['plus_di']:.1f}) vs -DI({metrics['minus_di']:.1f})
-3. Volatility: {metrics['expansion_rate']:.2f}倍 (スクイーズからの拡大が良い)
-4. Volume: {metrics['vol_ratio']:.2f}倍
-   - 推移: {metrics['vol_history']}
+[テクニカル指標]
+- ADX: {metrics['adx']:.1f}
+- RSI(9): {metrics['rsi_9']:.1f}
+- MACD Hist: {metrics['macd_hist']:.2f} ({metrics['macd_trend']})
+- Cloud: {metrics['price_vs_cloud']}
 
-[★ダマシ回避・精密検査]
-1. **MACD**: Hist={metrics['macd_hist']:.2f} ({metrics['macd_trend']})
-   - ヒストグラムがプラス圏で拡大中なら強い。マイナスなら警戒。
-2. **Ichimoku Cloud**: Price is {metrics['price_vs_cloud']} the Cloud.
-   - 雲の下(Below)での買いは自殺行為のため禁止。
-3. **Candle Shape**: {metrics['candle_shape']}
-   - 長い上ヒゲ(Bad)は売り圧力の証明。大陽線(Good)が理想。
-4. **Resistance**: 距離 {metrics['dist_to_res']:.1f}%
+### STRATEGY
+{strategy_desc}
+
+### EVALUATION FOCUS
+{eval_focus}
 
 {cbr_text}
-
-### EVALUATION LOGIC
-- **BUY条件**:
-  1. 抵抗線を明確に超えている、または直前でMACD等のモメンタムが強い。
-  2. 価格が「雲」の上にあること (必須)。
-  3. ローソク足に長い上ヒゲがないこと。
-  4. 出来高が伴っていること。
-
-- **HOLD条件**:
-  - 上記のいずれかに懸念がある場合。特に「上ヒゲ」や「雲の下」は即HOLD。
 
 ### OUTPUT REQUIREMENT (JSON ONLY)
 {{
   "action": "BUY" or "HOLD",
   "confidence": 0-100,
-  "stop_loss": "推奨する損切り価格（整数）",
-  "target_price": "推奨する利確目標価格（整数）",
+  "stop_loss": "推奨損切り価格",
+  "target_price": "推奨利確価格",
   "reason": "判断理由(50文字以内)"
 }}
 """
@@ -367,7 +370,6 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
     max_invest_amount = current_cash * MAX_INVEST_RATIO 
     
     for c in candidates_data:
-        # ATRベースのリスク管理は維持
         risk_per_share = c['metrics']['atr_value'] * 2.0
         risk_based_shares = int((current_cash * RISK_PER_TRADE) // risk_per_share) if risk_per_share > 0 else 0
         cap_based_shares = int(max_invest_amount // c['metrics']['price'])
@@ -375,7 +377,7 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
         if final_max_shares < 1: final_max_shares = 1 
 
         candidates_text += f"""
---- 候補: {c['ticker']} (Mode: {'GUERRILLA' if c['metrics']['adx'] < ADX_THRESHOLD else 'HOMERUN'}) ---
+--- 候補: {c['ticker']} (Mode: {c['mode']}) ---
 現在値: {c['metrics']['price']:.0f}円
 推奨最大株数: {final_max_shares}株
 【分析官報告】
@@ -424,8 +426,8 @@ def run_commander_batch(model, candidates_data, current_cash, current_portfolio_
 # 5. メイン実行
 # ==========================================
 def main():
-    print(f"=== 🧪 酸性試験 (V8: Adaptive Guerrilla Strategy) ({START_DATE} ~ {END_DATE}) ===")
-    print(f"Logic: ADX<{ADX_THRESHOLD} => Guerrilla (TP+5%), ADX>={ADX_THRESHOLD} => Homerun (No TP)")
+    print(f"=== 🧪 酸性試験 (V9: Market Switching & Expanded List) ({START_DATE} ~ {END_DATE}) ===")
+    print(f"Logic: ADX<{MARKET_ADX_THRESHOLD} => Guerrilla (Target:Growth), ADX>={MARKET_ADX_THRESHOLD} => Homerun (Target:Core)")
 
     memory = MemorySystem(LOG_FILE)
     try:
@@ -435,18 +437,28 @@ def main():
         return
 
     print("データ取得中...", end="")
+    # 1. 指数データの取得
+    nikkei = download_data_safe("^N225")
+    if nikkei is not None:
+        nikkei = calculate_technical_indicators(nikkei)
+        print("日経平均データ取得完了")
+    else:
+        print("日経平均データ取得失敗。デフォルトでCOREリストを使用します。")
+
+    # 2. 個別銘柄データの取得 (全銘柄)
     tickers_data = {}
-    for t in TRAINING_LIST:
+    all_tickers = sorted(list(set(LIST_CORE + LIST_GROWTH))) 
+    
+    for t in all_tickers:
         df = download_data_safe(t)
         if df is not None:
             df = calculate_technical_indicators(df)
             tickers_data[t] = df
-    print(f"完了 ({len(tickers_data)}銘柄)")
+    print(f"\n完了 ({len(tickers_data)}銘柄)")
 
     all_dates = sorted(list(set([d for t in tickers_data for d in tickers_data[t].index])))
     start_dt = pd.to_datetime(START_DATE).tz_localize(None)
     end_dt = pd.to_datetime(END_DATE).tz_localize(None)
-
     sim_dates = [d for d in all_dates if start_dt <= d.tz_localize(None) <= end_dt]
 
     if not sim_dates:
@@ -454,7 +466,7 @@ def main():
         return
 
     cash = INITIAL_CAPITAL
-    portfolio = {} # {ticker: {buy_price, shares, sl_price, max_price, atr, mode}}
+    portfolio = {} 
     trade_history = []
     equity_curve = []
     daily_history = []
@@ -464,7 +476,22 @@ def main():
     for current_date in sim_dates:
         date_str = current_date.strftime('%Y-%m-%d')
 
-        # --- A. ポートフォリオ管理 ---
+        # --- A. 環境認識 & リスト選択 ---
+        market_adx = 0
+        if nikkei is not None and current_date in nikkei.index:
+            market_adx = nikkei.loc[current_date]['ADX']
+        
+        # ★ここがスイッチングの肝
+        if market_adx >= MARKET_ADX_THRESHOLD:
+            todays_mode = 'HOMERUN'
+            target_list = LIST_CORE
+            mode_icon = "🔥" # 戦時
+        else:
+            todays_mode = 'GUERRILLA'
+            target_list = LIST_GROWTH
+            mode_icon = "☁️" # 平時
+
+        # --- B. ポートフォリオ管理 ---
         closed_tickers = []
         for ticker, pos in portfolio.items():
             df = tickers_data[ticker]
@@ -475,78 +502,64 @@ def main():
             day_high = float(day_data['High'])
             day_open = float(day_data['Open'])
             
-            mode = pos.get('mode', 'HOMERUN') # デフォルトはホームラン
+            pos_mode = pos.get('mode', 'HOMERUN') 
             
-            # --- 1. 損切り判定 (Stop Loss) ---
+            # 1. 損切り判定
             current_sl = float(pos['sl_price'])
             if day_low <= current_sl:
                 exec_price = current_sl
-                if day_open < current_sl: exec_price = day_open # ギャップダウン対応
-
+                if day_open < current_sl: exec_price = day_open
                 proceeds = exec_price * pos['shares']
                 cash += proceeds
                 profit = proceeds - (pos['buy_price'] * pos['shares'])
                 profit_rate = (exec_price - pos['buy_price']) / pos['buy_price'] * 100
-
-                icon = "🏆" if profit > 0 else "💀"
-                print(f"\n[{date_str}] {icon} 決済({mode} SL) {ticker}: {profit:+,.0f}円 ({profit_rate:+.2f}%)")
+                print(f"\n[{date_str}] 💀 損切({pos_mode}) {ticker}: {profit:+,.0f}円 ({profit_rate:+.2f}%)")
                 trade_history.append({'Result': 'WIN' if profit>0 else 'LOSS', 'PL': profit})
                 closed_tickers.append(ticker)
                 continue
 
-            # --- 2. 利確判定 (Take Profit) ---
-            # ゲリラモードの場合のみ、固定利確が存在する
-            if mode == 'GUERRILLA':
+            # 2. 利確判定 (ゲリラのみ)
+            if pos_mode == 'GUERRILLA':
                 target_price = pos['buy_price'] * (1 + GUERRILLA_TARGET)
                 if day_high >= target_price:
                     exec_price = target_price
                     if day_open > target_price: exec_price = day_open
-                    
                     proceeds = exec_price * pos['shares']
                     cash += proceeds
                     profit = proceeds - (pos['buy_price'] * pos['shares'])
                     profit_rate = (exec_price - pos['buy_price']) / pos['buy_price'] * 100
-                    
-                    print(f"\n[{date_str}] 💰 決済({mode} TP) {ticker}: {profit:+,.0f}円 ({profit_rate:+.2f}%)")
+                    print(f"\n[{date_str}] 💰 利確({pos_mode}) {ticker}: {profit:+,.0f}円 ({profit_rate:+.2f}%)")
                     trade_history.append({'Result': 'WIN', 'PL': profit})
                     closed_tickers.append(ticker)
                     continue
 
-            # --- 3. トレーリングストップ更新 (Trailing Stop) ---
-            if day_high > pos['max_price']:
-                pos['max_price'] = day_high
-            
-            # ホームランモードのみトレーリングを行う
-            if mode == 'HOMERUN':
+            # 3. トレーリングストップ (ホームランのみ)
+            if pos_mode == 'HOMERUN':
+                if day_high > pos['max_price']: pos['max_price'] = day_high
                 profit_pct_high = (pos['max_price'] - pos['buy_price']) / pos['buy_price']
-                
-                # +10%超えまでは動かさない
                 if profit_pct_high > HOMERUN_TRAIL_TRIGGER:
                     trail_dist = pos['atr'] * HOMERUN_TRAIL_WIDTH
                     new_sl = pos['max_price'] - trail_dist
-                    
-                    # 建値保証
-                    if profit_pct_high > 0.15:
-                         new_sl = max(new_sl, pos['buy_price'] * 1.005)
-                    
-                    if new_sl > pos['sl_price']:
-                        pos['sl_price'] = new_sl
+                    if profit_pct_high > 0.15: new_sl = max(new_sl, pos['buy_price'] * 1.005)
+                    if new_sl > pos['sl_price']: pos['sl_price'] = new_sl
 
         for t in closed_tickers: del portfolio[t]
 
-        # --- B. バッチ新規エントリー ---
+        # --- C. 新規エントリー (対象リストのみスキャン) ---
         if len(portfolio) < MAX_POSITIONS and cash > 10000:
             candidates_data = []
-
-            for ticker in tickers_data.keys():
+            
+            # その日のモードに合ったリストだけを見る
+            for ticker in target_list:
                 if ticker in portfolio: continue
+                if ticker not in tickers_data: continue # データ取得失敗時
+                
                 df = tickers_data[ticker]
                 if current_date not in df.index: continue
                 idx = df.index.get_loc(current_date)
                 if idx < 60: continue
 
                 metrics = calculate_metrics_at_date(df, idx)
-
                 iron_rule_check = check_iron_rules(metrics)
                 if iron_rule_check: continue 
 
@@ -555,9 +568,11 @@ def main():
                 chart_bytes = create_chart_image_at_date(df, idx, ticker)
                 if not chart_bytes: continue
                 similar_text = memory.get_similar_cases_text(metrics)
-                report = run_analyst(model, ticker, metrics, chart_bytes, similar_text)
+                
+                # モードを渡してAIに判断させる
+                report = run_analyst(model, ticker, metrics, chart_bytes, similar_text, todays_mode)
 
-                candidates_data.append({'ticker': ticker, 'metrics': metrics, 'report': report})
+                candidates_data.append({'ticker': ticker, 'metrics': metrics, 'report': report, 'mode': todays_mode})
                 time.sleep(1) 
 
             if candidates_data:
@@ -566,11 +581,8 @@ def main():
 
                 for order in decision_data.get('orders', []):
                     tic = order.get('ticker')
-                    
                     try:
-                        raw_shares = order.get('shares', 0)
-                        if isinstance(raw_shares, str): raw_shares = float(raw_shares.replace(',', ''))
-                        shares = int(raw_shares)
+                        shares = int(order.get('shares', 0))
                     except: shares = 0
 
                     if shares > 0:
@@ -578,46 +590,38 @@ def main():
                         if target:
                             metrics = target['metrics']
                             cost = shares * metrics['price']
-                            
                             if cost <= cash:
                                 cash -= cost
                                 atr_val = metrics['atr_value']
                                 
-                                # ★モード判定 (ここがV8の肝)
-                                current_adx = metrics['adx']
-                                strategy_mode = 'HOMERUN' if current_adx >= ADX_THRESHOLD else 'GUERRILLA'
-                                
-                                # 損切り設定
-                                if strategy_mode == 'GUERRILLA':
-                                    stop_multiplier = GUERRILLA_STOP # 1.5
+                                # モードに応じた初期損切り
+                                if todays_mode == 'GUERRILLA':
+                                    stop_mult = GUERRILLA_STOP # 1.5
                                 else:
-                                    stop_multiplier = HOMERUN_STOP_INIT # 1.8
+                                    stop_mult = HOMERUN_STOP_INIT # 1.8
                                 
-                                initial_sl = metrics['price'] - atr_val * stop_multiplier
+                                initial_sl = metrics['price'] - atr_val * stop_mult
                                 
                                 portfolio[tic] = {
                                     'buy_price': metrics['price'], 'shares': shares,
                                     'sl_price': initial_sl, 'max_price': metrics['price'], 'atr': atr_val,
-                                    'mode': strategy_mode # モードを保存
+                                    'mode': todays_mode
                                 }
-                                
-                                icon = "🥷" if strategy_mode == 'GUERRILLA' else "⚾"
-                                print(f"\n[{date_str}] {icon} 新規({strategy_mode}) {tic}: {shares}株")
+                                print(f"\n[{date_str}] {mode_icon} 新規({todays_mode}) {tic}: {shares}株")
 
-        # --- C. 資産集計 ---
+        # --- D. 資産集計 ---
         current_equity = cash
         holdings_val = 0
         holdings_detail = []
-
         for t, pos in portfolio.items():
             if current_date in tickers_data[t].index:
                 price = float(tickers_data[t].loc[current_date]['Close'])
                 val = price * pos['shares']
                 current_equity += val
                 holdings_val += val
-                holdings_detail.append(f"{t}({pos.get('mode','?')})")
+                holdings_detail.append(f"{t}({pos['mode'][0]})")
 
-        print(f"\r[{date_str}] 資産: {current_equity:,.0f}円 (現金: {cash:,.0f}円 / 株: {holdings_val:,.0f}円)", end="")
+        print(f"\r[{date_str}] {mode_icon}資産:{current_equity:,.0f} (H:{len(portfolio)})", end="")
         equity_curve.append(current_equity)
 
         daily_history.append({
@@ -626,29 +630,20 @@ def main():
             "Cash": int(cash),
             "Holdings_Value": int(holdings_val),
             "Positions_Count": len(portfolio),
-            "Holdings_Detail": ", ".join(holdings_detail)
+            "Holdings_Detail": ", ".join(holdings_detail),
+            "Market_Mode": todays_mode
         })
 
     # --- 終了処理 ---
     print("\n" + "="*50)
-    print(f"🏁 バックテスト終了")
-
     if daily_history:
         df_history = pd.DataFrame(daily_history)
         df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
-        print(f"📄 詳細履歴を '{HISTORY_CSV}' に保存しました。")
+        print(f"📄 履歴保存: {HISTORY_CSV}")
 
     final_equity = equity_curve[-1] if equity_curve else INITIAL_CAPITAL
     profit = final_equity - INITIAL_CAPITAL
-    roi = (profit / INITIAL_CAPITAL) * 100
-    print(f"最終資産: {final_equity:,.0f}円")
-    print(f"合計損益: {profit:+,.0f}円 ({roi:+.2f}%)")
-
-    wins = len([t for t in trade_history if t['Result']=='WIN'])
-    losses = len([t for t in trade_history if t['Result']=='LOSS'])
-    total = wins + losses
-    if total > 0:
-        print(f"勝敗: {wins}勝 {losses}敗 (勝率: {wins/total*100:.1f}%)")
+    print(f"最終資産: {final_equity:,.0f}円 ({profit:+,.0f}円)")
 
 if __name__ == "__main__":
     main()

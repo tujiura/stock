@@ -34,45 +34,46 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
 
-# ★ファイル名をV8に変更
-LOG_FILE = "ai_trade_memory_aggressive_v8.csv" 
-MODEL_NAME = 'models/gemini-2.5-flash'
+# ★ファイル名をV9_EXPに変更
+LOG_FILE = "ai_trade_memory_aggressive_v9_exp.csv" 
+MODEL_NAME = 'models/gemini-2.0-flash'
 
-TRAINING_ROUNDS = 40000
+TRAINING_ROUNDS = 10000
 TIMEFRAME = "1d"
 CBR_NEIGHBORS_COUNT = 15
 TRADE_BUDGET = 1000000 
 
-# ★ V8 (Adaptive Guerrilla) パラメータ
-ADX_THRESHOLD = 30.0           # 戦時/平時の分岐点
+# ★ V9 ロジックパラメータ (Individual ADXで判断)
+ADX_THRESHOLD = 30.0           
 
-# [A] ゲリラモード (ADX < 30)
-GUERRILLA_TARGET = 0.05        # 固定利確 +5%
-GUERRILLA_STOP_MULT = 1.5      # タイトな損切り (ATR x 1.5)
+# [A] ゲリラモード
+GUERRILLA_TARGET = 0.06        # +6%
+GUERRILLA_STOP_MULT = 1.5      
 
-# [B] ホームランモード (ADX >= 30)
-HOMERUN_STOP_MULT = 1.8        # 初期損切り (ATR x 1.8)
-HOMERUN_TRAIL_TRIGGER = 0.10   # トレーリング開始 (+10%)
-HOMERUN_TRAIL_MULT = 2.0       # 追従幅 (ATR x 2.0)
+# [B] ホームランモード
+HOMERUN_STOP_MULT = 1.8        
+HOMERUN_TRAIL_TRIGGER = 0.10   
+HOMERUN_TRAIL_MULT = 2.0       
 
 # 鉄の掟
 MA_DEV_DANGER_LOW = 10.0     
 MA_DEV_DANGER_HIGH = 15.0    
 
-# トレーニング対象リスト
-TRAINING_LIST = [
-    "6254.T", "8035.T", "2768.T", "6305.T", "6146.T",
-    "6920.T", "6857.T", "7735.T", "6723.T", "6963.T", "3436.T", "6526.T", "6315.T",
-    "6758.T", "6861.T", "6981.T", "6594.T", "6954.T", "6506.T", "6702.T", "6752.T", "7751.T", "6501.T", "6503.T",
-    "7203.T", "7267.T", "7269.T", "7270.T", "7201.T", "7259.T", "6902.T",
-    "7011.T", "7013.T", "7012.T", "6301.T", "6367.T", "7003.T",
-    "8058.T", "8001.T", "8031.T", "8002.T", "8053.T", "7459.T",
-    "8306.T", "8316.T", "8411.T", "8766.T", "8725.T", "8591.T", "8604.T", "8698.T",
-    "9984.T", "9432.T", "9433.T", "9434.T", "6098.T", "2413.T", "4661.T", "4385.T", "4751.T", "9613.T",
-    "9983.T", "3382.T", "8267.T", "2802.T", "2914.T", "4911.T", "4543.T", "4503.T", "4568.T",
-    "7974.T", "9697.T", "9766.T", "5253.T", 
-    "9101.T", "9104.T", "9107.T", "5401.T", "5411.T", "1605.T", "5713.T", "5020.T", "4063.T", "4901.T"
+# === トレーニング対象リスト (拡張版: Core + Growth) ===
+LIST_CORE = [
+    "8035.T", "6857.T", "6146.T", "6920.T", "6758.T", "6702.T", "6501.T", "6503.T", "7751.T", "4063.T", "6981.T", "6723.T",
+    "7203.T", "7267.T", "6902.T", "6301.T", "6367.T", "7011.T", "7013.T", 
+    "8306.T", "8316.T", "8411.T", "8766.T", "8058.T", "8001.T", "8031.T", "8002.T", "9984.T",
+    "9432.T", "9983.T", "4568.T", "4543.T", "4661.T", "7974.T", "6506.T"
 ]
+LIST_GROWTH = [
+    "5253.T", "5032.T", "9166.T", "4385.T", "4478.T", "4483.T", "3993.T", "4180.T", "3687.T", "6027.T",
+    "5595.T", "9348.T", "7012.T", "6203.T", 
+    "6254.T", "6315.T", "6526.T", "6228.T", "6963.T", "3436.T", "7735.T", "6890.T",
+    "2768.T", "7342.T", "2413.T", "2222.T", "7532.T", "3092.T",
+    "9101.T", "9104.T", "9107.T", "1605.T", "5713.T", "5401.T", "5411.T"
+]
+TRAINING_LIST = sorted(list(set(LIST_CORE + LIST_GROWTH)))
 
 plt.rcParams['font.family'] = 'sans-serif'
 genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
@@ -98,10 +99,8 @@ def calculate_technical_indicators(df):
     df = df.copy()
     close = df['Close']; high = df['High']; low = df['Low']
     
-    # 基本指標
     df['SMA25'] = close.rolling(25).mean()
     
-    # 1. DMI/ADX
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
     tr3 = abs(low - close.shift(1))
@@ -119,35 +118,29 @@ def calculate_technical_indicators(df):
     df['ADX'] = dx.rolling(14).mean()
     df['ATR'] = tr.rolling(14).mean()
 
-    # 2. Bollinger Bands
     sma20 = close.rolling(20).mean()
     std20 = close.rolling(20).std()
     df['BB_Width'] = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100
     df['Vol_MA20'] = df['Volume'].rolling(20).mean()
     
-    # 3. RSI
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(9).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(9).mean()
     df['RSI9'] = 100 - (100 / (1 + gain/loss))
 
-    # 4. MACD
     exp12 = close.ewm(span=12, adjust=False).mean()
     exp26 = close.ewm(span=26, adjust=False).mean()
     df['MACD'] = exp12 - exp26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['Signal']
 
-    # 5. 一目均衡表 (雲)
     high9 = high.rolling(9).max(); low9 = low.rolling(9).min()
     tenkan = (high9 + low9) / 2
     high26 = high.rolling(26).max(); low26 = low.rolling(26).min()
     kijun = (high26 + low26) / 2
-    
     senkou_a = ((tenkan + kijun) / 2).shift(26)
     high52 = high.rolling(52).max(); low52 = low.rolling(52).min()
     senkou_b = ((high52 + low52) / 2).shift(26)
-    
     df['Cloud_Top'] = pd.concat([senkou_a, senkou_b], axis=1).max(axis=1)
 
     return df.dropna()
@@ -186,7 +179,7 @@ def calculate_metrics_for_training(df, idx):
     upper_shadow = high_p - body_top
     total_range = high_p - low_p
     shadow_ratio = upper_shadow / total_range if total_range > 0 else 0
-    candle_shape = "Good" if shadow_ratio < 0.3 else "Bad (Long Upper Shadow)"
+    candle_shape = "Good" if shadow_ratio < 0.3 else "Bad"
 
     return {
         'price': price,
@@ -212,14 +205,11 @@ def calculate_metrics_for_training(df, idx):
 def check_iron_rules(metrics):
     if metrics['adx'] < 20: return "ADX<20"
     if metrics['vol_ratio'] < 0.8: return "Vol<0.8"
-    
     ma_dev = metrics['ma_deviation']
     if MA_DEV_DANGER_LOW <= ma_dev <= MA_DEV_DANGER_HIGH: 
         return f"DangerZone({ma_dev:.1f}%)"
     if metrics['adx'] > 55: return "ADX Overheat"
-    
-    if metrics['price_vs_cloud'] == "Below": return "Below Ichimoku Cloud"
-    
+    if metrics['price_vs_cloud'] == "Below": return "Below Cloud"
     return None
 
 # ==========================================
@@ -233,15 +223,15 @@ class CaseBasedMemory:
         self.df = pd.DataFrame()
         self.feature_cols = ['adx', 'prev_adx', 'ma_deviation', 'vol_ratio', 'expansion_rate', 'dist_to_res']
         
-        # 保存カラム (Strategy_Mode追加)
         self.csv_columns = [
             "Date", "Ticker", "Timeframe", "Action", "result", "Reason", 
             "Confidence", "stop_loss_price", "target_price", 
             "Actual_High", "Target_Diff", "Target_Reach",
             "Price", "adx", "prev_adx", "ma_deviation", "rs_rating", 
             "vol_ratio", "expansion_rate", "dist_to_res", 
+            "macd_hist", "price_vs_cloud", 
             "days_to_earnings", "margin_ratio", "profit_rate",
-            "Strategy_Mode" # <--- 新規追加
+            "Strategy_Mode"
         ]
         self.load_and_train()
 
@@ -316,7 +306,7 @@ def create_chart_image(df, name):
         ax1.plot(data.index, data['Cloud_Top'], color='blue', alpha=0.2, label='Cloud Top')
         ax1.fill_between(data.index, data['Cloud_Top'], data['Close'].min(), color='blue', alpha=0.05)
 
-    ax1.set_title(f"{name} V8 Hybrid Chart")
+    ax1.set_title(f"{name} V9 Expanded Chart")
     ax1.legend(); ax1.grid(True, alpha=0.3)
     ax2.bar(data.index, data['Volume'], color='gray', alpha=0.5)
     
@@ -326,47 +316,52 @@ def create_chart_image(df, name):
 def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
     if metrics['adx'] < 20: return {"action": "HOLD", "reason": "ADX<20"}
     
+    # ★ V9: プロンプト自動切替 (個別ADXで判断)
+    is_homerun_mode = metrics['adx'] >= ADX_THRESHOLD
+    
+    if is_homerun_mode:
+        role_text = "あなたは「強気トレンドフォロワー」です。勢いのある銘柄に飛び乗り、利益を最大化します。"
+        strategy_desc = "現在は「戦時(トレンド相場)」です。押し目より高値ブレイクを優先し、小さな過熱感は無視して大きく狙ってください。"
+        eval_focus = "1. MACD拡大中か？ 2. 雲の上か？ 3. 新高値更新の勢いがあるか？"
+    else:
+        role_text = "あなたは「逆張りスナイパー」です。レンジ相場での反発や押し目を狙います。"
+        strategy_desc = "現在は「平時(レンジ相場)」です。ブレイクアウトはダマシの可能性が高いです。RSIの売られすぎやバンド下限からの反発を狙ってください。"
+        eval_focus = "1. RSIは低位か？ 2. 移動平均線でのサポートはあるか？ 3. 下ヒゲなどの反発サインはあるか？"
+
     prompt = f"""
 ### ROLE
-あなたは「高精度スナイパー・トレンドフォローAI」です。
-ダマシ(False Breakout)を極限まで回避し、本物のトレンド初動のみを狙撃します。
+{role_text}
 
 ### INPUT DATA
 銘柄: {ticker} (現在価格: {metrics['price']:.0f}円)
 
-[基本指標]
-1. Trend (ADX): {metrics['adx']:.1f} (閾値25以上)
-2. Direction: +DI({metrics['plus_di']:.1f}) vs -DI({metrics['minus_di']:.1f})
-3. Volatility: {metrics['expansion_rate']:.2f}倍 (スクイーズからの拡大が良い)
-4. Volume: {metrics['vol_ratio']:.2f}倍
-   - 推移: {metrics['vol_history']}
+[テクニカル指標]
+- ADX: {metrics['adx']:.1f} (トレンド強度)
+- RSI(9): {metrics['rsi_9']:.1f}
+- Volatility: {metrics['expansion_rate']:.2f}倍
+- MACD Hist: {metrics['macd_hist']:.2f}
+- Volume推移: {metrics['vol_history']}
 
 [★ダマシ回避・精密検査]
 1. **MACD**: Hist={metrics['macd_hist']:.2f} ({metrics['macd_trend']})
-   - ヒストグラムがプラス圏で拡大中なら強い。マイナスなら警戒。
-2. **Ichimoku Cloud**: Price is {metrics['price_vs_cloud']} the Cloud.
-   - 雲の下(Below)での買いは自殺行為のため禁止。
-3. **Candle Shape**: {metrics['candle_shape']}
-   - 長い上ヒゲ(Bad)は売り圧力の証明。大陽線(Good)が理想。
+2. **Cloud**: Price is {metrics['price_vs_cloud']} the Cloud.
+3. **Candle**: {metrics['candle_shape']}
 4. **Resistance**: 距離 {metrics['dist_to_res']:.1f}%
 
+### STRATEGY
+{strategy_desc}
+
+### EVALUATION FOCUS
+{eval_focus}
+
 {cbr_text}
-
-### EVALUATION LOGIC
-- **BUY条件**:
-  1. 抵抗線を明確に超えている、または直前でMACD等のモメンタムが強い。
-  2. 価格が「雲」の上にあること (必須)。
-  3. 出来高が伴って増加傾向にあること。
-
-- **HOLD条件**:
-  - 上記のいずれかに懸念がある場合。特に「上ヒゲ」や「雲の下」は即HOLD。
 
 ### OUTPUT REQUIREMENT (JSON ONLY)
 {{
   "action": "BUY" or "HOLD",
   "confidence": 0-100,
-  "stop_loss": "推奨する損切り価格（整数）",
-  "target_price": "推奨する利確目標株価（整数）",
+  "stop_loss": "推奨損切り価格",
+  "target_price": "推奨利確価格",
   "reason": "判断理由(50文字以内)"
 }}
 """
@@ -381,11 +376,11 @@ def ai_decision_maker(model, chart_bytes, metrics, cbr_text, ticker):
         return {"action": "HOLD", "reason": "AI Error", "confidence": 0}
 
 # ==========================================
-# 4. メイン実行 (トレーニングモード: V8 Adaptive)
+# 4. メイン実行 (トレーニングモード)
 # ==========================================
 def main():
     start_time = time.time()
-    print(f"=== AI強化合宿 [AGGRESSIVE V8] (Adaptive Guerrilla) ===")
+    print(f"=== AI強化合宿 [AGGRESSIVE V9] (Expanded List + Adaptive Prompt) ===")
     
     memory_system = CaseBasedMemory(LOG_FILE) 
     try: model_instance = genai.GenerativeModel(MODEL_NAME)
@@ -422,6 +417,10 @@ def main():
         past_df = df.iloc[:target_idx+1]
         chart_bytes = create_chart_image(past_df, ticker)
         
+        # モード判定
+        strategy_mode = 'HOMERUN' if metrics['adx'] >= ADX_THRESHOLD else 'GUERRILLA'
+        
+        # AI判断 (V9)
         decision = ai_decision_maker(model_instance, chart_bytes, metrics, cbr_text, ticker)
         action = decision.get('action', 'HOLD')
         conf = decision.get('confidence', 0)
@@ -431,14 +430,12 @@ def main():
         entry_price = float(metrics['price'])
         atr = metrics['atr_value']
         
-        # ★モード判定 (V8)
-        strategy_mode = 'HOMERUN' if metrics['adx'] >= ADX_THRESHOLD else 'GUERRILLA'
-        
-        # 初期損切り設定
         ai_stop = decision.get('stop_loss', 0)
-        try: ai_stop = int(ai_stop)
-        except: ai_stop = 0
+        ai_target = decision.get('target_price', 0)
+        try: ai_stop = int(ai_stop); ai_target = int(ai_target)
+        except: ai_stop = 0; ai_target = 0
         
+        # 損切り設定
         if strategy_mode == 'GUERRILLA':
             initial_stop_mult = GUERRILLA_STOP_MULT
         else:
@@ -465,7 +462,7 @@ def main():
             high = row['High']; low = row['Low']; close = row['Close']
             day_open = row['Open']
             
-            # 1. 損切り判定
+            # 1. 損切り
             if low <= current_stop_loss:
                 is_loss = True
                 exec_price = current_stop_loss
@@ -473,9 +470,8 @@ def main():
                 final_exit_price = exec_price
                 break
             
-            # 2. 利確・トレーリング更新 (モード別)
+            # 2. 利確・トレーリング
             if strategy_mode == 'GUERRILLA':
-                # 固定利確 (+5%)
                 target_p = entry_price * (1 + GUERRILLA_TARGET)
                 if high >= target_p:
                     is_win = True
@@ -483,22 +479,14 @@ def main():
                     if day_open > target_p: exec_price = day_open
                     final_exit_price = exec_price
                     break
-            
-            else: # HOMERUN MODE
-                if high > max_price:
-                    max_price = high
-                
+            else: # HOMERUN
+                if high > max_price: max_price = high
                 profit_pct_high = (max_price - entry_price) / entry_price
-                
-                # +10%超えまでは動かさない
                 if profit_pct_high > HOMERUN_TRAIL_TRIGGER:
                     trail_dist = atr * HOMERUN_TRAIL_MULT
                     new_stop = max_price - trail_dist
-                    if profit_pct_high > 0.15:
-                         new_stop = max(new_stop, entry_price * 1.005)
-                    
-                    if new_stop > current_stop_loss:
-                        current_stop_loss = new_stop
+                    if profit_pct_high > 0.15: new_stop = max(new_stop, entry_price * 1.005)
+                    if new_stop > current_stop_loss: current_stop_loss = new_stop
 
         if not is_loss and not is_win:
             final_exit_price = future_prices['Close'].iloc[-1]
@@ -509,11 +497,6 @@ def main():
         if profit_loss > 0: result = "WIN"; win_count += 1
         elif profit_loss < 0: result = "LOSS"; loss_count += 1
 
-        # AIの目標価格 (記録用)
-        ai_target = decision.get('target_price', 0)
-        try: ai_target = int(ai_target)
-        except: ai_target = 0
-        
         target_diff = actual_high - ai_target if ai_target > 0 else 0
         target_reach = 0
         if ai_target > 0:
@@ -540,10 +523,12 @@ def main():
             'vol_ratio': metrics['vol_ratio'], 
             'expansion_rate': metrics['expansion_rate'],
             'dist_to_res': metrics['dist_to_res'], 
+            'macd_hist': metrics['macd_hist'],
+            'price_vs_cloud': metrics['price_vs_cloud'],
             'days_to_earnings': 999, 
             'margin_ratio': 1.0, 
             'profit_rate': profit_rate,
-            'Strategy_Mode': strategy_mode # ★モード記録
+            'Strategy_Mode': strategy_mode 
         }
         memory_system.save_experience(save_data)
         time.sleep(1)
