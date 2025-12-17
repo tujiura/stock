@@ -8,7 +8,7 @@ import os
 # ★設定エリア
 # ==========================================
 FILES = {
-    "🎯 攻撃型 V8 (Sniper: MACD/雲)": "ai_trade_memory_aggressive_v9_exp.csv",
+    "🎯 攻撃型 V9 (Sniper: MACD/雲)": "ai_trade_memory_aggressive_v9_exp.csv",
     "🚀 攻撃型 V7 (ホームラン狙い)": "ai_trade_memory_aggressive_v7.csv",
     "🔥 攻撃型 V5 (分割決済)": "ai_trade_memory_aggressive_v5.csv",
     "🛡️ 資産防衛型": "ai_trade_memory_risk_managed.csv",
