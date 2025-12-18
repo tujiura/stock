@@ -41,7 +41,7 @@ if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
 
 # 設定
-LOG_FILE = "ai_trade_memory_aggressive_v12.csv" 
+LOG_FILE = "ai_trade_memory_aggressive_v12_fixed_cols.csv" 
 MODEL_NAME = 'models/gemini-3-pro-preview'
 
 # V12 Parameters
@@ -69,24 +69,34 @@ plt.rcParams['font.family'] = 'sans-serif'
 genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
 
 # ==========================================
-# 0. Discord 通知機能
+# 0. Discord 通知機能 (修正版)
 # ==========================================
 def send_discord_notify(message, filename=None):
     if not DISCORD_WEBHOOK_URL:
-        print("⚠️ Discord Webhook URLが設定されていません。")
+        print("⚠️ Discord Webhook URLが設定されていません。通知をスキップします。")
         return
     try:
         now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-        content = f"🚀 **AI市場監視 V12 ({now_str})**\n{message[:1900]}"
-        if len(message) > 1900: content += "\n..."
         
-        payload = {"content": content}
-        files = {}
-        if filename:
-            files["file"] = (f"MarketReport_{now_str.replace(':','-')}.txt", message.encode('utf-8'))
+        # メッセージ本文 (長すぎる場合は切り詰め)
+        content_body = f"🚀 **AI市場監視レポート V13 ({now_str})**\n\n{message}"
+        if len(content_body) > 1900:
+            content_body = content_body[:1900] + "\n...(詳細は添付ファイルを参照)"
 
-        requests.post(DISCORD_WEBHOOK_URL, data=payload, files=files if filename else None)
-        print("✅ Discord通知送信成功")
+        payload = {"content": content_body}
+        files = {}
+        
+        # 長文用テキストファイル添付
+        if filename:
+            files["file"] = (filename, message.encode('utf-8'))
+
+        response = requests.post(DISCORD_WEBHOOK_URL, data=payload, files=files if filename else None)
+        
+        if response.status_code in [200, 204]:
+            print("✅ Discord通知送信成功")
+        else:
+            print(f"⚠️ Discord送信エラー: {response.status_code} - {response.text}")
+            
     except Exception as e:
         print(f"⚠️ Discord送信例外: {e}")
 
@@ -122,8 +132,24 @@ def get_fundamentals(ticker):
     except:
         return {'PER': None, 'PBR': None}
 
+def calculate_market_filter(market_df):
+    try:
+        df = market_df.copy()
+        close = df['Close']
+        df['SMA25'] = close.rolling(25).mean()
+        df['SMA200'] = close.rolling(200).mean()
+        
+        conditions = [
+            (close > df['SMA200']),
+            (close <= df['SMA200']) & (close > df['SMA25']),
+            (close <= df['SMA200']) & (close <= df['SMA25'])
+        ]
+        choices = ['Bullish', 'Recovery', 'Bearish']
+        df['Market_Regime'] = np.select(conditions, choices, default='Unknown')
+        return df['Market_Regime']
+    except: return None
+
 def calculate_technical_indicators_v12(df):
-    # V12ロジック (トレーニング用と同じ)
     try:
         df = df.copy()
         close = df['Close']; high = df['High']; low = df['Low']; vol = df['Volume']
@@ -175,10 +201,23 @@ def calculate_technical_indicators_v12(df):
         return df.dropna()
     except Exception: return None
 
-def calculate_metrics_v12(df, idx):
+def calculate_metrics_v12(df, idx, market_regime_series=None):
     try:
+        if idx < 60 or idx >= len(df): return None
         curr = df.iloc[idx]
         price = float(curr['Close'])
+        
+        market_regime = "Unknown"
+        if market_regime_series is not None:
+            target_date = df.index[idx]
+            try:
+                if target_date in market_regime_series.index:
+                    market_regime = market_regime_series.loc[target_date]
+                else:
+                    prev_loc = market_regime_series.index.get_indexer([target_date], method='pad')[0]
+                    if prev_loc != -1: market_regime = market_regime_series.iloc[prev_loc]
+            except: pass
+
         adx = float(curr.get('ADX', 20.0))
         roc = float(curr.get('ROC', 0.0))
         mfi = float(curr.get('MFI', 50.0))
@@ -211,11 +250,13 @@ def calculate_metrics_v12(df, idx):
             'price_vs_cloud': price_vs_cloud,
             'rsi': float(curr.get('RSI', 50.0)),
             'regime': regime,
-            'vwap_dev': float(curr.get('VWAP_Dev', 0.0))
+            'vwap_dev': float(curr.get('VWAP_Dev', 0.0)),
+            'market_regime': market_regime
         }
     except Exception: return None
 
 def check_iron_rules_v12(metrics):
+    if metrics['market_regime'] == 'Bearish': return "Market Bearish"
     if metrics['roc'] > ROC_MAX: return f"ROC Too High ({metrics['roc']:.1f}%)"
     if metrics['adx'] > 50: return "ADX Overheat (>50)"
     if metrics['price_vs_cloud'] == "Below": return "Below Cloud"
@@ -231,11 +272,13 @@ class MemorySystem:
         self.load_and_train()
 
     def load_and_train(self):
-        if not os.path.exists(self.csv_path):
-            print(f"⚠️ 学習データ {self.csv_path} が見つかりません。CBR機能は無効になります。")
-            return
+        if not os.path.exists(self.csv_path): return
         try:
             self.df = pd.read_csv(self.csv_path)
+            if 'Date' in self.df.columns:
+                 self.df['Date_Parsed'] = pd.to_datetime(self.df['Date'], errors='coerce')
+                 self.df = self.df.dropna(subset=['Date_Parsed'])
+            
             self.df.columns = [c.strip() for c in self.df.columns]
             if 'result' in self.df.columns:
                 valid_df = self.df[self.df['result'].isin(['WIN', 'LOSS'])].copy()
@@ -248,8 +291,7 @@ class MemorySystem:
                     global CBR_NEIGHBORS_COUNT
                     self.knn = NearestNeighbors(n_neighbors=min(CBR_NEIGHBORS_COUNT, len(valid_df)), metric='euclidean')
                     self.knn.fit(self.features_normalized)
-        except Exception as e:
-            print(f"⚠️ メモリ読み込みエラー: {e}")
+        except Exception: pass
 
     def get_similar_cases_text(self, current_metrics):
         if self.knn is None: return "（データ不足）"
@@ -293,16 +335,10 @@ def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
 ### Input Data
 銘柄: {ticker} (現在値: {metrics['price']:.0f}円)
 
-[Early Trend Indicators]
-- **ADX**: {metrics['adx']:.1f} (理想: 20-35)
-- **ROC(10)**: {metrics['roc']:.1f}%
-- **MFI**: {metrics['mfi']:.1f}
-- **Regime**: **{metrics['regime']}**
-
-[Confirmation]
-- VWAP Deviation: {metrics['vwap_dev']:.2f}%
-- RSI(14): {metrics['rsi']:.1f}
-- Cloud Position: {metrics['price_vs_cloud']}
+[Market Data]
+- ADX: {metrics['adx']:.1f}
+- ROC(10): {metrics['roc']:.1f}%
+- Market Regime: {metrics['market_regime']}
 
 {cbr_text}
 
@@ -313,7 +349,7 @@ def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
   "confidence": 0-100,
   "sl_multiplier": 2.5,
   "tp_multiplier": 5.0,
-  "reason": "理由(50文字以内)"
+  "reason": "理由"
 }}
 """
     safety = {HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
@@ -322,11 +358,10 @@ def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
         text = response.text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match: return json.loads(match.group(0))
-    except Exception:
-        return {"action": "HOLD", "reason": "AI Error", "confidence": 0}
+    except: return {"action": "HOLD", "reason": "Error", "confidence": 0}
 
 def main():
-    print(f"=== 🚀 AI Market Monitor V12 (Early Trend Hunter) ===")
+    print(f"=== 🚀 AI Market Monitor V13 (Details Added) ===")
     
     memory = MemorySystem(LOG_FILE)
     try:
@@ -338,7 +373,15 @@ def main():
     print(f"対象銘柄数: {len(WATCH_LIST)}")
     print("市場をスキャン中...")
     
+    # 市場データ取得
+    nikkei = download_data_safe("^N225")
+    market_regime_series = None
+    if nikkei is not None:
+        market_regime_series = calculate_market_filter(nikkei)
+        print("Market data OK.")
+    
     candidates = []
+    all_prices_lines = []
     
     for i, ticker in enumerate(WATCH_LIST):
         print(f"[{i+1}/{len(WATCH_LIST)}] Checking {ticker}...", end="", flush=True)
@@ -346,19 +389,38 @@ def main():
         df = download_data_safe(ticker, period="1y")
         if df is None:
             print(" -> Skip (No Data)")
+            all_prices_lines.append(f"{ticker}: データ取得失敗")
             continue
             
         df = calculate_technical_indicators_v12(df)
         if df is None:
             print(" -> Skip (Calc Error)")
+            all_prices_lines.append(f"{ticker}: 計算エラー")
             continue
             
         idx = len(df) - 1
-        metrics = calculate_metrics_v12(df, idx)
+        metrics = calculate_metrics_v12(df, idx, market_regime_series)
         if metrics is None: 
             print(" -> Skip (Metric Error)")
+            all_prices_lines.append(f"{ticker}: 指標エラー")
             continue
-            
+        
+        # --- 株価詳細情報の作成 ---
+        curr_row = df.iloc[-1]
+        high_val = float(curr_row['High'])
+        low_val = float(curr_row['Low'])
+        atr_val = metrics['atr_value']
+        adx_val = metrics['adx']
+        
+        # ADXトレンド判定
+        prev_adx = df['ADX'].iloc[-2] if len(df) > 1 else adx_val
+        adx_trend = "➚" if adx_val > prev_adx else "➘"
+        
+        # フォーマット: 7203.T 現在値: 3360 高値: 3380 / 安値: 3340 ATR: 85 (ADX: 35➚)
+        price_info = f"{ticker} 現在値: {metrics['price']:.0f} 高値: {high_val:.0f} / 安値: {low_val:.0f} ATR: {atr_val:.0f} (ADX: {adx_val:.0f}{adx_trend})"
+        all_prices_lines.append(price_info)
+        # ------------------------
+
         iron_rule = check_iron_rules_v12(metrics)
         if iron_rule:
             print(f" -> Skip ({iron_rule})")
@@ -413,9 +475,15 @@ def main():
             discord_message += "-"*20 + "\n"
     else:
         print("本日の推奨銘柄はありませんでした。")
-        discord_message = "本日の推奨銘柄はありませんでした。"
+        discord_message = "本日の推奨銘柄はありませんでした。\n"
 
-    send_discord_notify(discord_message)
+    # 全銘柄リストの追加
+    discord_message += "\n**【全監視銘柄 詳細データ】**\n"
+    discord_message += "(Code | Close | High/Low | ATR | Memo)\n"
+    discord_message += "\n".join(all_prices_lines)
+
+    # 送信 (長文対応: ファイルとして添付)
+    send_discord_notify(discord_message, filename="Market_Monitor_Full_V13.txt")
 
 if __name__ == "__main__":
     main()
