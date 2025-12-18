@@ -39,8 +39,8 @@ LOG_FILE = "ai_trade_memory_aggressive_v12.csv"
 HISTORY_CSV = "backtest_history_v12.csv"
 MODEL_NAME = 'models/gemini-2.0-flash'
 
-START_DATE = "2020-01-01"
-END_DATE   = "2025-11-30"
+START_DATE = "2015-01-01"
+END_DATE   = "2018-12-30"
 
 INITIAL_CAPITAL = 100000 
 RISK_PER_TRADE = 0.40      
@@ -76,7 +76,7 @@ genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
 # ==========================================
 # 1. データ取得
 # ==========================================
-def download_data_safe(ticker, period="7y", interval="1d", retries=3): 
+def download_data_safe(ticker, period="12y", interval="1d", retries=3): 
     wait = 1
     for attempt in range(retries):
         try:
