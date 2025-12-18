@@ -40,7 +40,7 @@ HISTORY_CSV = "backtest_history_v12.csv"
 MODEL_NAME = 'models/gemini-2.0-flash'
 
 START_DATE = "2020-01-01"
-END_DATE   = "2022-12-30"
+END_DATE   = "2025-11-30"
 
 INITIAL_CAPITAL = 100000 
 RISK_PER_TRADE = 0.40      
