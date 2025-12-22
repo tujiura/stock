@@ -1,39 +1,42 @@
-import yfinance as yf
+import os
 import pandas as pd
-import matplotlib.pyplot as plt  # グラフを描画するためにインポート
 
-# 1. データを取得
-df = yf.download('9432.T', period='1y')
+# あなたが設定したつもりのファイル名
+target_file = "ai_trade_memory_v15_aggressive.csv"
 
-# 【ここが修正ポイント！】
-# カラムが ('Close', '9432.T') のような2段組みになっている場合、
-# 1段目の 'Close' だけを残して単純な形にします。
-if isinstance(df.columns, pd.MultiIndex):
-    df.columns = df.columns.get_level_values(0)
+print(f"=== ファイル診断: {target_file} ===")
+print(f"📂 現在の作業フォルダ: {os.getcwd()}")
 
-# 2. 移動平均(SMA)の計算
-# これで df['Close'] が確実に「1列の数値」として扱われます
-df['SMA25'] = df['Close'].rolling(window=25).mean()
-
-# 3. ボリンジャーバンドの計算
-sigma = df['Close'].rolling(window=25).std()
-df['Upper'] = df['SMA25'] + (2 * sigma)
-df['Lower'] = df['SMA25'] - (2 * sigma)
-
-# 確認のため、最後の5行を表示
-print(df[['Close', 'SMA25', 'Upper', 'Lower']].tail())
-
-# 4. グラフを表示（せっかくなので可視化しましょう）
-plt.figure(figsize=(10, 6))
-plt.plot(df.index, df['Close'], label='Close', color='black', alpha=0.6)
-plt.plot(df.index, df['SMA25'], label='SMA25', color='orange')
-plt.plot(df.index, df['Upper'], label='Upper (2sigma)', color='green', linestyle='--')
-plt.plot(df.index, df['Lower'], label='Lower (2sigma)', color='green', linestyle='--')
-
-# ±2σの間を薄い色で塗る
-plt.fill_between(df.index, df['Upper'], df['Lower'], color='green', alpha=0.1)
-
-plt.title('NTT (9432.T) Bollinger Bands')
-plt.legend()
-plt.grid()
-plt.show()
+# 1. ファイルの存在確認
+if os.path.exists(target_file):
+    print("✅ ファイルは存在します。")
+    
+    # 2. 読み込みテスト (Excelロックなどを検知)
+    try:
+        df = pd.read_csv(target_file)
+        print(f"✅ 読み込み成功！ データ件数: {len(df)}行")
+        print("📝 カラム一覧:", df.columns.tolist())
+        
+        # 3. データの中身チェック
+        wins = len(df[df['Result'] == 'WIN'])
+        losses = len(df[df['Result'] == 'LOSS'])
+        print(f"📊 勝敗データ: WIN={wins}, LOSS={losses}")
+        
+        if wins + losses < 5:
+            print("⚠️ 注意: データは読めましたが、勝敗データが少なすぎます（5件未満）。")
+        else:
+            print("🎉 診断結果: データは完璧です。AIコード側の問題の可能性が高いです。")
+            
+    except PermissionError:
+        print("\n❌ 【原因特定】ファイルが開かれています！")
+        print("👉 Excelなどでこのファイルを開いていませんか？ 閉じてから再実行してください。")
+    except Exception as e:
+        print(f"\n❌ 読み込みエラー: {e}")
+else:
+    print("\n❌ 【原因特定】ファイルが見つかりません！")
+    print("👉 フォルダの中に以下のファイルがあるか確認してください:")
+    files = [f for f in os.listdir() if f.endswith(".csv")]
+    for f in files:
+        print(f"   - {f}")
+    
+    print("\n※ 'agressive' (gが1つ) と 'aggressive' (gが2つ) の違いに注意してください。")

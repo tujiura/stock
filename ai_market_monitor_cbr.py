@@ -6,6 +6,9 @@ import datetime
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import matplotlib
+# GUI画面を出さずに画像だけ作るモード('Agg')に設定
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import google.generativeai as genai
 from sklearn.neighbors import NearestNeighbors
@@ -16,13 +19,13 @@ import logging
 import socket
 import requests
 import requests.packages.urllib3.util.connection as urllib3_cn
-from scipy.signal import argrelextrema
 import warnings
 
 # ---------------------------------------------------------
 # ★環境設定
 # ---------------------------------------------------------
 warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, module='sklearn')
 
 def allowed_gai_family():
     return socket.AF_INET
@@ -41,14 +44,14 @@ if not GOOGLE_API_KEY:
     print("エラー: GOOGLE_API_KEY が設定されていません。")
 
 # 設定
-LOG_FILE = "ai_trade_memory_aggressive_v12_fixed_cols.csv" 
-MODEL_NAME = 'models/gemini-3-pro-preview'
+LOG_FILE = "ai_trade_memory_v15_aggressive.csv" # V15の記憶ファイル
+MODEL_NAME = 'models/gemini-3-pro-preview'  # V15モデル
 
-# V12 Parameters
-ADX_MIN = 20.0
-ADX_MAX = 40.0
-ROC_MAX = 15.0
-ATR_MULTIPLIER = 2.5
+# V15 Aggressive Parameters
+ADX_MIN = 15.0  
+ADX_MAX = 75.0  
+ROC_MAX = 100.0 
+ATR_MULTIPLIER = 2.0 
 VWAP_WINDOW = 20
 
 # 監視リスト
@@ -69,24 +72,25 @@ plt.rcParams['font.family'] = 'sans-serif'
 genai.configure(api_key=GOOGLE_API_KEY, transport="rest")
 
 # ==========================================
-# 0. Discord 通知機能 (修正版)
+# 0. Discord 通知機能 (V15仕様)
 # ==========================================
 def send_discord_notify(message, filename=None):
     if not DISCORD_WEBHOOK_URL:
         print("⚠️ Discord Webhook URLが設定されていません。通知をスキップします。")
         return
     try:
-        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        # 日時タグ (自動変換)
+        ts = int(time.time())
+        time_tag = f"<t:{ts}:f>" # 例: 2024年1月1日 12:00
         
-        # メッセージ本文 (長すぎる場合は切り詰め)
-        content_body = f"🚀 **AI市場監視レポート V13 ({now_str})**\n\n{message}"
+        # メッセージ本文 (V15仕様)
+        content_body = f"🚀 **AI市場監視レポート V15 (Berserker) {time_tag}**\n\n{message}"
         if len(content_body) > 1900:
             content_body = content_body[:1900] + "\n...(詳細は添付ファイルを参照)"
 
         payload = {"content": content_body}
         files = {}
         
-        # 長文用テキストファイル添付
         if filename:
             files["file"] = (filename, message.encode('utf-8'))
 
@@ -101,7 +105,7 @@ def send_discord_notify(message, filename=None):
         print(f"⚠️ Discord送信例外: {e}")
 
 # ==========================================
-# 1. データ取得 & テクニカル計算
+# 1. データ取得 & テクニカル計算 (V15)
 # ==========================================
 def download_data_safe(ticker, period="1y", interval="1d", retries=3): 
     wait = 1
@@ -132,134 +136,74 @@ def get_fundamentals(ticker):
     except:
         return {'PER': None, 'PBR': None}
 
-def calculate_market_filter(market_df):
-    try:
-        df = market_df.copy()
-        close = df['Close']
-        df['SMA25'] = close.rolling(25).mean()
-        df['SMA200'] = close.rolling(200).mean()
-        
-        conditions = [
-            (close > df['SMA200']),
-            (close <= df['SMA200']) & (close > df['SMA25']),
-            (close <= df['SMA200']) & (close <= df['SMA25'])
-        ]
-        choices = ['Bullish', 'Recovery', 'Bearish']
-        df['Market_Regime'] = np.select(conditions, choices, default='Unknown')
-        return df['Market_Regime']
-    except: return None
-
-def calculate_technical_indicators_v12(df):
+def calculate_technical_v15(df):
     try:
         df = df.copy()
         close = df['Close']; high = df['High']; low = df['Low']; vol = df['Volume']
+        
         df['SMA25'] = close.rolling(25).mean()
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        tr = pd.concat([high-low, abs(high-close.shift(1)), abs(low-close.shift(1))], axis=1).max(axis=1)
         df['ATR'] = tr.rolling(14).mean()
+        
         plus_dm = high.diff().clip(lower=0)
         minus_dm = low.diff().clip(upper=0).abs()
-        plus_dm = np.where(plus_dm > minus_dm, plus_dm, 0)
-        minus_dm = np.where(minus_dm > plus_dm, minus_dm, 0)
         tr_smooth = tr.rolling(14).mean().replace(0, np.nan)
-        plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(14).mean() / tr_smooth)
-        minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(14).mean() / tr_smooth)
-        denom = (plus_di + minus_di).replace(0, np.nan)
-        df['ADX'] = (abs(plus_di - minus_di) / denom) * 100
+        plus_di = 100 * (plus_dm.rolling(14).mean() / tr_smooth)
+        minus_di = 100 * (minus_dm.rolling(14).mean() / tr_smooth)
+        df['ADX'] = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
         df['ADX'] = df['ADX'].rolling(14).mean()
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss.replace(0, np.nan)
-        df['RSI'] = 100 - (100 / (1 + rs))
-        df['RSI'] = df['RSI'].fillna(50)
-        exp12 = close.ewm(span=12, adjust=False).mean()
-        exp26 = close.ewm(span=26, adjust=False).mean()
-        df['MACD'] = exp12 - exp26
-        df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        df['MACD_Hist'] = df['MACD'] - df['Signal']
+        
         df['ROC'] = close.pct_change(10) * 100
+        
         tp = (high + low + close) / 3
         df['VP'] = tp * vol
         cumulative_vp = df['VP'].rolling(window=VWAP_WINDOW).sum()
         cumulative_vol = vol.rolling(window=VWAP_WINDOW).sum().replace(0, np.nan)
         df['VWAP'] = cumulative_vp / cumulative_vol
         df['VWAP_Dev'] = np.where(df['VWAP'].notna(), ((close - df['VWAP']) / df['VWAP']) * 100, 0)
-        money_flow = tp * vol
-        positive_flow = money_flow.where(tp > tp.shift(1), 0).rolling(14).sum()
-        negative_flow = money_flow.where(tp < tp.shift(1), 0).rolling(14).sum()
-        mfi_ratio = positive_flow / negative_flow.replace(0, np.nan)
-        df['MFI'] = 100 - (100 / (1 + mfi_ratio))
-        df['MFI'] = df['MFI'].fillna(50)
+        
         tenkan = (high.rolling(9).max() + low.rolling(9).min()) / 2
         kijun = (high.rolling(26).max() + low.rolling(26).min()) / 2
         senkou_a = ((tenkan + kijun) / 2).shift(26)
         senkou_b = ((high.rolling(52).max() + low.rolling(52).min()) / 2).shift(26)
         df['Cloud_Top'] = pd.concat([senkou_a, senkou_b], axis=1).max(axis=1)
+        
         return df.dropna()
     except Exception: return None
 
-def calculate_metrics_v12(df, idx, market_regime_series=None):
+def calculate_metrics_v15(df, idx):
     try:
         if idx < 60 or idx >= len(df): return None
         curr = df.iloc[idx]
         price = float(curr['Close'])
         
-        market_regime = "Unknown"
-        if market_regime_series is not None:
-            target_date = df.index[idx]
-            try:
-                if target_date in market_regime_series.index:
-                    market_regime = market_regime_series.loc[target_date]
-                else:
-                    prev_loc = market_regime_series.index.get_indexer([target_date], method='pad')[0]
-                    if prev_loc != -1: market_regime = market_regime_series.iloc[prev_loc]
-            except: pass
-
         adx = float(curr.get('ADX', 20.0))
         roc = float(curr.get('ROC', 0.0))
-        mfi = float(curr.get('MFI', 50.0))
         
-        if ADX_MIN <= adx <= ADX_MAX: regime = "Trend Start/Growth"
-        elif adx > ADX_MAX: regime = "Overheated Trend"
-        else: regime = "Range/Weak"
+        # V15 Regime
+        if ADX_MIN <= adx <= ADX_MAX: regime = "Trend"
+        elif adx > ADX_MAX: regime = "Super Trend" # V15 Overheat
+        else: regime = "Weak"
 
-        recent_high = df['High'].iloc[idx-60:idx].max()
-        dist_to_res = ((price - recent_high) / recent_high) * 100 if recent_high > 0 else 0
-        ma_deviation = ((price / float(curr['SMA25'])) - 1) * 100
-        
-        macd_hist = float(curr.get('MACD_Hist', 0.0))
-        prev_hist = float(df['MACD_Hist'].iloc[idx-1]) if idx > 0 else 0.0
-        
         cloud_top = float(curr.get('Cloud_Top', price))
         price_vs_cloud = "Above" if price > cloud_top else "Below"
 
         return {
             'date': df.index[idx].strftime('%Y-%m-%d'),
             'price': price,
-            'dist_to_res': dist_to_res,
-            'ma_deviation': ma_deviation,
             'adx': adx,
             'roc': roc,
-            'mfi': mfi,
             'atr_value': float(curr.get('ATR', price*0.01)),
-            'macd_hist': macd_hist,
-            'macd_trend': "Expanding" if abs(macd_hist) > abs(prev_hist) else "Shrinking",
             'price_vs_cloud': price_vs_cloud,
-            'rsi': float(curr.get('RSI', 50.0)),
             'regime': regime,
-            'vwap_dev': float(curr.get('VWAP_Dev', 0.0)),
-            'market_regime': market_regime
+            'vwap_dev': float(curr.get('VWAP_Dev', 0.0))
         }
     except Exception: return None
 
-def check_iron_rules_v12(metrics):
-    if metrics['market_regime'] == 'Bearish': return "Market Bearish"
-    if metrics['roc'] > ROC_MAX: return f"ROC Too High ({metrics['roc']:.1f}%)"
-    if metrics['adx'] > 50: return "ADX Overheat (>50)"
-    if metrics['price_vs_cloud'] == "Below": return "Below Cloud"
+def check_iron_rules_v15(metrics):
+    # V15: 鉄の掟 (大幅緩和)
+    if metrics['price_vs_cloud'] == "Below" and metrics['roc'] < 5: 
+        return "Below Cloud (Weak)"
     return None
 
 class MemorySystem:
@@ -268,18 +212,24 @@ class MemorySystem:
         self.scaler = StandardScaler()
         self.knn = None
         self.df = pd.DataFrame()
-        self.feature_cols = ['adx', 'roc', 'mfi', 'vwap_dev', 'rsi']
+        # V15 特徴量
+        self.feature_cols = ['adx', 'roc', 'vwap_dev'] 
         self.load_and_train()
 
     def load_and_train(self):
         if not os.path.exists(self.csv_path): return
         try:
             self.df = pd.read_csv(self.csv_path)
-            if 'Date' in self.df.columns:
-                 self.df['Date_Parsed'] = pd.to_datetime(self.df['Date'], errors='coerce')
-                 self.df = self.df.dropna(subset=['Date_Parsed'])
-            
             self.df.columns = [c.strip() for c in self.df.columns]
+            
+            # V15用マッピング
+            col_map = {
+                'ADX': 'adx', 'ROC_10': 'roc', 
+                'VWAP_Distance_Percent': 'vwap_dev', 'Volume_Change_Percent': 'vol_change',
+                'Result': 'result'
+            }
+            self.df.rename(columns=col_map, inplace=True)
+
             if 'result' in self.df.columns:
                 valid_df = self.df[self.df['result'].isin(['WIN', 'LOSS'])].copy()
                 if len(valid_df) > 5:
@@ -288,8 +238,7 @@ class MemorySystem:
                     features = valid_df[self.feature_cols].fillna(0)
                     self.features_normalized = self.scaler.fit_transform(features)
                     self.valid_df_for_knn = valid_df 
-                    global CBR_NEIGHBORS_COUNT
-                    self.knn = NearestNeighbors(n_neighbors=min(CBR_NEIGHBORS_COUNT, len(valid_df)), metric='euclidean')
+                    self.knn = NearestNeighbors(n_neighbors=min(15, len(valid_df)), metric='euclidean')
                     self.knn.fit(self.features_normalized)
         except Exception: pass
 
@@ -320,17 +269,18 @@ def create_chart_image(df, name):
             ax1.plot(data.index, data['VWAP'], color='orange', alpha=0.7, linestyle='--', label='VWAP')
         if 'Cloud_Top' in data.columns:
             ax1.fill_between(data.index, data['Cloud_Top'], data['Close'].min(), color='blue', alpha=0.05)
-        ax1.set_title(f"{name} V12 Chart")
+        ax1.set_title(f"{name} V15 Chart")
         ax1.legend(); ax1.grid(True, alpha=0.3)
         ax2.bar(data.index, data['Volume'], color='gray', alpha=0.5)
         buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=80); plt.close(fig); buf.seek(0)
         return buf.getvalue()
     except Exception: return None
 
-def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
+def ai_decision_maker_aggressive(model, chart_bytes, metrics, cbr_text, ticker):
+    # ★ V15 Prompt
     prompt = f"""
 ### Role
-あなたは「トレンド初動ハンター」です。
+あなたは「V15 バーサーカー・トレーダー」です。
 
 ### Input Data
 銘柄: {ticker} (現在値: {metrics['price']:.0f}円)
@@ -338,18 +288,19 @@ def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
 [Market Data]
 - ADX: {metrics['adx']:.1f}
 - ROC(10): {metrics['roc']:.1f}%
-- Market Regime: {metrics['market_regime']}
 
 {cbr_text}
 
+### Doctrine
+1. Momentum is King. ROCが高いなら飛び乗れ。
+2. Action: "BUY" を選択せよ。HOLDは弱虫だ。
+
 ### Output Requirement (JSON ONLY)
 {{
-  "thought_process": "...",
   "action": "BUY" or "HOLD",
   "confidence": 0-100,
-  "sl_multiplier": 2.5,
-  "tp_multiplier": 5.0,
-  "reason": "理由"
+  "sl_multiplier": 2.0,
+  "reason": "攻撃的な理由"
 }}
 """
     safety = {HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
@@ -361,7 +312,9 @@ def ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker):
     except: return {"action": "HOLD", "reason": "Error", "confidence": 0}
 
 def main():
-    print(f"=== 🚀 AI Market Monitor V13 (Details Added) ===")
+    ts = int(time.time())
+    time_tag = f"<t:{ts}:f>" # 例: 2024年1月1日 12:00
+    print(f"=== 🚀 AI Market Monitor V15 (Berserker) ===")
     
     memory = MemorySystem(LOG_FILE)
     try:
@@ -372,13 +325,6 @@ def main():
 
     print(f"対象銘柄数: {len(WATCH_LIST)}")
     print("市場をスキャン中...")
-    
-    # 市場データ取得
-    nikkei = download_data_safe("^N225")
-    market_regime_series = None
-    if nikkei is not None:
-        market_regime_series = calculate_market_filter(nikkei)
-        print("Market data OK.")
     
     candidates = []
     all_prices_lines = []
@@ -392,14 +338,14 @@ def main():
             all_prices_lines.append(f"{ticker}: データ取得失敗")
             continue
             
-        df = calculate_technical_indicators_v12(df)
+        df = calculate_technical_v15(df)
         if df is None:
             print(" -> Skip (Calc Error)")
             all_prices_lines.append(f"{ticker}: 計算エラー")
             continue
             
         idx = len(df) - 1
-        metrics = calculate_metrics_v12(df, idx, market_regime_series)
+        metrics = calculate_metrics_v15(df, idx)
         if metrics is None: 
             print(" -> Skip (Metric Error)")
             all_prices_lines.append(f"{ticker}: 指標エラー")
@@ -416,12 +362,12 @@ def main():
         prev_adx = df['ADX'].iloc[-2] if len(df) > 1 else adx_val
         adx_trend = "➚" if adx_val > prev_adx else "➘"
         
-        # フォーマット: 7203.T 現在値: 3360 高値: 3380 / 安値: 3340 ATR: 85 (ADX: 35➚)
+        # フォーマット (維持)
         price_info = f"{ticker} 現在値: {metrics['price']:.0f} 高値: {high_val:.0f} / 安値: {low_val:.0f} ATR: {atr_val:.0f} (ADX: {adx_val:.0f}{adx_trend})"
         all_prices_lines.append(price_info)
         # ------------------------
 
-        iron_rule = check_iron_rules_v12(metrics)
+        iron_rule = check_iron_rules_v15(metrics)
         if iron_rule:
             print(f" -> Skip ({iron_rule})")
             continue
@@ -430,12 +376,13 @@ def main():
         chart_bytes = create_chart_image(df, ticker)
         cbr_text = memory.get_similar_cases_text(metrics)
         
-        decision = ai_decision_maker_v12(model, chart_bytes, metrics, cbr_text, ticker)
+        decision = ai_decision_maker_aggressive(model, chart_bytes, metrics, cbr_text, ticker)
         
-        action = decision.get('action', decision.get('decision', 'HOLD'))
+        action = decision.get('action', 'HOLD')
         conf = decision.get('confidence', 0)
         
-        if action == "BUY" and conf >= 70:
+        # V15の基準 (攻撃的)
+        if action == "BUY" and conf >= 60: # 閾値を70->60に緩和
             atr = metrics['atr_value']
             sl_mult = float(decision.get('sl_multiplier', ATR_MULTIPLIER))
             sl_price = metrics['price'] - (atr * sl_mult)
@@ -467,7 +414,8 @@ def main():
         df_res = pd.DataFrame(candidates)
         print(df_res[['Ticker', 'Price', 'Conf', 'SL', 'Regime', 'Reason']].to_string(index=False))
         
-        discord_message = f"**【AI推奨銘柄 V12】** ({datetime.datetime.now().strftime('%Y-%m-%d')})\n\n"
+        # Discordメッセージフォーマット (V15仕様)
+        discord_message = f"**【AI推奨銘柄 V15 (Berserker)】**\n\n" + time_tag + "\n\n"
         for c in candidates:
             discord_message += f"**{c['Ticker']}** (現在値: {c['Price']:.0f}円)\n"
             discord_message += f"📊 {c['Regime']} | 🔥 自信度: {c['Conf']}%\n"
@@ -477,13 +425,13 @@ def main():
         print("本日の推奨銘柄はありませんでした。")
         discord_message = "本日の推奨銘柄はありませんでした。\n"
 
-    # 全銘柄リストの追加
+    # 全銘柄リストの追加 (そのまま維持)
     discord_message += "\n**【全監視銘柄 詳細データ】**\n"
     discord_message += "(Code | Close | High/Low | ATR | Memo)\n"
     discord_message += "\n".join(all_prices_lines)
 
-    # 送信 (長文対応: ファイルとして添付)
-    send_discord_notify(discord_message, filename="Market_Monitor_Full_V13.txt")
+    # 送信
+    send_discord_notify(discord_message, filename="Market_Monitor_Full_V15.txt")
 
 if __name__ == "__main__":
     main()

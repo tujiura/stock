@@ -46,7 +46,7 @@ if not GOOGLE_API_KEY:
 LOG_FILE = "ai_trade_memory_v15_aggressive.csv" # V15用ファイル
 MODEL_NAME = 'models/gemini-2.0-flash'
 
-TRAINING_ROUNDS = 1000 
+TRAINING_ROUNDS = 8000 
 TIMEFRAME = "1d"
 TRADE_BUDGET = 1000000 
 
@@ -214,58 +214,97 @@ def check_iron_rules_v15(metrics):
 class MemorySystem:
     def __init__(self, csv_path):
         self.csv_path = csv_path
+        self.scaler = StandardScaler()
+        self.knn = None
+        self.df = pd.DataFrame()
+        
+        # ★ V15でAI検索に使用する特徴量（これを先に定義！）
+        self.feature_cols = ['adx', 'roc', 'vwap_dev'] 
+        
+        # 保存用ヘッダー定義（CSVの並び順と一致させる）
         self.headers = [
             "Date","Ticker","Timeframe","Action","Result","Reasoning","Confidence",
             "Entry_Price","Entry_Signal_Volume","Exit_Price","Exit_Signal_Price",
             "ADX","ROC_10","Market_Regime_Score","VWAP_Distance_Percent",
             "Volume_Change_Percent","Market_Regime","Sub_Regime","profit_rate"
         ]
+        
         self.load_and_train()
 
     def load_and_train(self):
-        self.df = pd.DataFrame(columns=self.headers)
-        if os.path.exists(self.csv_path):
-            try: self.df = pd.read_csv(self.csv_path)
-            except: pass
-        
-        self.feature_cols = ['ADX', 'ROC_10', 'VWAP_Distance_Percent']
-        self.knn = None
-        
-        if len(self.df) > 5:
-            for c in self.feature_cols:
-                if c not in self.df.columns: self.df[c] = 0
-            valid_df = self.df[self.df['Result'].isin(['WIN', 'LOSS'])].copy()
-            if len(valid_df) > 5:
-                features = valid_df[self.feature_cols].fillna(0)
-                self.scaler = StandardScaler()
-                features_norm = self.scaler.fit_transform(features)
-                n = min(15, len(valid_df))
-                self.knn = NearestNeighbors(n_neighbors=n).fit(features_norm)
-                self.valid_df_knn = valid_df
+        if not os.path.exists(self.csv_path): return
 
-    def save_experience(self, data_dict):
-        row = {k: data_dict.get(k, "") for k in self.headers}
-        df_row = pd.DataFrame([row])
-        if not os.path.exists(self.csv_path):
-            df_row.to_csv(self.csv_path, index=False)
-        else:
-            df_row.to_csv(self.csv_path, mode='a', header=False, index=False)
+        try:
+            self.df = pd.read_csv(self.csv_path)
+            self.df.columns = [c.strip() for c in self.df.columns]
+            
+            # カラム名の読み替え（CSVの大文字 → プログラムの小文字）
+            col_map = {
+                'Result': 'result', 
+                'Action': 'action',
+                'ADX': 'adx', 
+                'ROC_10': 'roc', 
+                'VWAP_Distance_Percent': 'vwap_dev', 
+                'Volume_Change_Percent': 'vol_change'
+            }
+            self.df.rename(columns=col_map, inplace=True)
 
-    def get_similar_cases_text(self, metrics):
+            if 'result' in self.df.columns:
+                valid_df = self.df[self.df['result'].isin(['WIN', 'LOSS'])].copy()
+                if len(valid_df) > 5:
+                    # 必要な特徴量カラムがなければ0で埋める
+                    for col in self.feature_cols:
+                        if col not in valid_df.columns: valid_df[col] = 0
+                    
+                    features = valid_df[self.feature_cols].fillna(0)
+                    self.features_normalized = self.scaler.fit_transform(features)
+                    self.valid_df_for_knn = valid_df 
+                    
+                    n = min(15, len(valid_df))
+                    self.knn = NearestNeighbors(n_neighbors=n, metric='euclidean')
+                    self.knn.fit(self.features_normalized)
+                    print(f"✅ 記憶ロード完了: {len(valid_df)}件のトレード経験")
+        except Exception as e:
+            print(f"❌ 記憶ロードエラー: {e}")
+
+    def get_similar_cases_text(self, current_metrics):
         if self.knn is None: return "（データ不足）"
         try:
-            vec = [[metrics.get(c, 0) for c in self.feature_cols]]
-            vec_norm = self.scaler.transform(vec)
+            # 入力データをDataFrame化して警告を回避
+            vec = [current_metrics.get(col, 0) for col in self.feature_cols]
+            input_df = pd.DataFrame([vec], columns=self.feature_cols)
+            
+            # 検索実行
+            vec_norm = self.scaler.transform(input_df)
             dists, indices = self.knn.kneighbors(vec_norm)
-            win = 0; loss = 0
+            
+            win_c = 0; loss_c = 0
             for idx in indices[0]:
-                res = self.valid_df_knn.iloc[idx]['Result']
-                if res == 'WIN': win += 1
-                if res == 'LOSS': loss += 1
-            rate = win / (win+loss) * 100 if (win+loss)>0 else 0
-            return f"【過去類似局面】勝率: {rate:.0f}% (勝{win}/負{loss})"
+                row = self.valid_df_for_knn.iloc[idx]
+                res = str(row.get('result', ''))
+                if res == 'WIN': win_c += 1
+                if res == 'LOSS': loss_c += 1
+            
+            rate = win_c / (win_c + loss_c) * 100 if (win_c + loss_c) > 0 else 0
+            return f"勝率: {rate:.0f}% (勝{win_c}/負{loss_c})"
         except: return "（検索エラー）"
 
+    # ★復活させた保存機能
+    def save_experience(self, data_dict):
+        try:
+            # 必要なカラムだけ抽出して並べ替え
+            row = {k: data_dict.get(k, "") for k in self.headers}
+            df_row = pd.DataFrame([row])
+            
+            # ファイルが存在しない場合は新規作成（ヘッダー付き）
+            if not os.path.exists(self.csv_path):
+                df_row.to_csv(self.csv_path, index=False, encoding='utf-8')
+            else:
+                # 存在する場合は追記（ヘッダーなし）
+                df_row.to_csv(self.csv_path, mode='a', header=False, index=False, encoding='utf-8')
+        except Exception as e:
+            print(f"❌ 保存エラー: {e}")
+            
 def create_chart_image(df, name):
     try:
         data = df.tail(60).copy()
